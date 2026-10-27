@@ -159,6 +159,15 @@ public final class Gui {
         if (messages.size() > 50) messages.removeElementAt(messages.size() - 1);
     }
 
+    private Object[] notice;
+
+    /** Уведомление игры (снизу, как сообщения): заменяет своё прошлое, а не копится в чате. */
+    public void notice(String s) {
+        if (notice != null) messages.removeElement(notice);
+        notice = new Object[] { s, new int[1] };
+        messages.insertElementAt(notice, 0);
+    }
+
     public void tick() {
         tickCount++;
         if (itemNameTime < 2) itemNameTime += 1f / 20;

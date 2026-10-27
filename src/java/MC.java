@@ -421,6 +421,7 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
         Graphics g = getGraphics();
         devW = W = getWidth();
         devH = H = getHeight();
+        gameThread = Thread.currentThread();
         try {
             drawLoading(g, "Loading...", -1);
             R.load();
@@ -500,7 +501,12 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
                 if (isShown()) Thread.yield();
                 else Thread.sleep(50);
             } catch (Throwable t) {
-                Log.e("loop", t);
+                // и запись в лог, и снижение дальности сами могут не найти памяти — поток игры не терять
+                try {
+                    Log.e("loop", t);
+                    lowerView(t, "loop");
+                } catch (Throwable e) {
+                }
                 try { Thread.sleep(200); } catch (InterruptedException e) { }
             }
         }
@@ -582,6 +588,29 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
         R.dropTextures(0);
         if (MemDbg.on) MemDbg.mark("create");
         Graphics g = getGraphics();
+        long g0 = System.currentTimeMillis();
+        Level l;
+        // нехватка памяти — дальность ниже и генерация заново (недостроенный мир — мусор вместе с кадром genLevel)
+        while (true) {
+            try {
+                l = genLevel(name, seed, gameType, g);
+                break;
+            } catch (OutOfMemoryError e) {
+                if (!lowerView(e, "gen")) throw e;
+            }
+        }
+        if (MemDbg.on) MemDbg.mark("gendone");
+        Player p = new Player(l, gameType == 1);
+        p.respawn();
+        long g1 = System.currentTimeMillis();
+        drawLoading(g, "Saving chunks", 100);
+        if (Storage.init()) saveWorld(l, p);
+        if (MemDbg.on) MemDbg.mark("saved");
+        Log.i("GEN " + (g1 - g0) + " ms, save " + (System.currentTimeMillis() - g1) + " ms, " + memInfo(l));
+        startGame(l, p);
+    }
+
+    private Level genLevel(String name, long seed, int gameType, final Graphics fg) {
         Level l = new Level();
         if (MemDbg.on) MemDbg.mark("level");
         l.name = name;
@@ -589,8 +618,6 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
         l.gameType = gameType;
         l.folder = Storage.makeFolderName(name);
         l.time = 0;
-        final Graphics fg = g;
-        long g0 = System.currentTimeMillis();
         Gen gen = new Gen(l, seed);
         if (MemDbg.on) MemDbg.mark("gen0");
         gen.generate(new Gen.Progress() {
@@ -599,16 +626,7 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
                 drawLoading(fg, "Building terrain", pct);
             }
         });
-        gen = null;
-        if (MemDbg.on) MemDbg.mark("gendone");
-        Player p = new Player(l, gameType == 1);
-        p.respawn();
-        long g1 = System.currentTimeMillis();
-        drawLoading(g, "Saving chunks", 100);
-        if (Storage.init()) Storage.saveAll(l, p);
-        if (MemDbg.on) MemDbg.mark("saved");
-        Log.i("GEN " + (g1 - g0) + " ms, save " + (System.currentTimeMillis() - g1) + " ms, " + memInfo(l));
-        startGame(l, p);
+        return l;
     }
 
     public void loadWorld(String folder) {
@@ -616,7 +634,16 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
         Graphics g = getGraphics();
         drawLoading(g, "Building terrain", -1);
         long t0 = System.currentTimeMillis();
-        Level l = Storage.load(folder);
+        Level l;
+        while (true) {
+            try {
+                l = Storage.load(folder);
+                break;
+            } catch (OutOfMemoryError e) {
+                if (!lowerView(e, "load")) throw e;
+                drawLoading(g, "Building terrain", -1);
+            }
+        }
         loadMs = System.currentTimeMillis() - t0;
         if (MemDbg.on) MemDbg.mark("loaded");
         if (l == null) {
@@ -631,6 +658,67 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
             else p.resetPos();
         } else p.respawn();
         startGame(l, p);
+    }
+
+    /** Storage.saveAll; нехватка памяти — дальность ниже и запись заново, на минимуме — как раньше: без записи. */
+    private void saveWorld(Level l, Player p) {
+        while (true) {
+            try {
+                Storage.saveAll(l, p);
+                return;
+            } catch (OutOfMemoryError e) {
+                if (!lowerView(e, "save")) {
+                    Log.e("save", e);
+                    return;
+                }
+            }
+        }
+    }
+
+    // ---- нехватка памяти: дальность прорисовки ниже на чанк вместо вылета ----
+
+    /** на сколько чанков дальность снижена из-за нехватки памяти (для уведомления; сброс — игрок сам сменил дальность) */
+    int viewCut;
+    private Thread gameThread;
+
+    /**
+     * OutOfMemoryError на шаге загрузки или в игре: дальность на чанк ниже (и в сохранённых настройках), лишние
+     * меши — сборщику мусора вместе с пулом частей. true — дальность снижена, шаг стоит повторить; false — не
+     * нехватка памяти или дальность уже минимальная (память всё равно подчищена).
+     */
+    boolean lowerView(Throwable t, String where) {
+        if (!(t instanceof OutOfMemoryError) || Thread.currentThread() != gameThread) return false;
+        if (lr != null) lr.oomCleanup();
+        int v = Options.viewChunks;
+        boolean lower = v > Options.VIEW_MIN;
+        if (lower) {
+            Options.viewChunks = v - 1;
+            viewCut++;
+            applyOptions();
+            if (lr != null && player != null) lr.updateRange(player.x, player.z);
+        }
+        // мира нет (генерация, загрузка) — меши прошлого мира больше не нужны
+        if (level == null) {
+            LevelRenderer.release();
+            particles.level = null;
+        }
+        LevelRenderer.trimPool();
+        R.dropTextures(0);
+        Runtime.getRuntime().gc();
+        if (MemDbg.on) MemDbg.sweepNow();
+        if (!lower) return false;
+        // раз памяти не хватило — не хватит и в следующий раз: дальность в настройки (бенчмарк свои не пишет)
+        if (!Bench.on()) {
+            try {
+                Options.save();
+            } catch (Throwable e) {
+                Log.e("options save", e);
+            }
+        }
+        int cut = viewCut;
+        Log.i("OOM at " + where + ": view " + Options.viewChunks + " chunks (-" + cut + ")");
+        if (gui != null) gui.notice("Render distance reduced by " + cut + (cut == 1 ? " chunk" : " chunks"));
+        return true;
     }
 
     long loadMs;
@@ -768,11 +856,12 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
                     l.folder = Storage.makeFolderName(name);
                     l.isClientSide = false;
                     for (int i = l.entities.size() - 1; i >= 0; i--) if (l.entities.elementAt(i) instanceof RemotePlayer) l.entities.removeElementAt(i);
-                    if (Storage.init()) Storage.saveAll(l, p);
+                    if (Storage.init()) saveWorld(l, p);
                 }
                 level = null;
                 player = null;
                 lr = null;
+                releaseWorld();
                 setScreen(new StartMenuScreen());
             }
         });
@@ -803,7 +892,14 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
         int total = lr.pendingCount();
         int guard = 0;
         while (lr.hasPending() && guard++ < 400) {
-            lr.updateDirty(p.x, p.y + Player.EYE, p.z, 60);
+            try {
+                lr.updateDirty(p.x, p.y + Player.EYE, p.z, 60);
+            } catch (OutOfMemoryError e) {
+                // на минимальной дальности — в игру с тем, что успело построиться (остальное достроится в игре)
+                if (!lowerView(e, "prepare")) break;
+                total = lr.pendingCount();
+                continue;
+            }
             int done = total - lr.pendingCount();
             drawLoading(g, "Preparing", -1);
             if (done > total * 3 / 4) break;
@@ -927,7 +1023,7 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
         if (level == null || level.folder == null) return;
         if (!Storage.init()) return;
         long t0 = System.currentTimeMillis();
-        Storage.saveAll(level, player);
+        saveWorld(level, player);
         Log.i("SAVE " + (System.currentTimeMillis() - t0) + " ms");
     }
 
@@ -938,7 +1034,14 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
         level = null;
         player = null;
         lr = null;
+        releaseWorld();
         setScreen(new StartMenuScreen());
+    }
+
+    /** Мир закрыт: его меши — в пул, частицы его не держат (иначе прошлый мир живёт до входа в следующий). */
+    private void releaseWorld() {
+        LevelRenderer.release();
+        particles.level = null;
     }
 
     private void pickupItems() {
@@ -2085,6 +2188,11 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
             if (Prof.on) Prof.add(Prof.F_HAND, r3);
         } catch (Throwable t) {
             Log.e("render3d", t);
+            try {
+                lowerView(t, "render");
+            } catch (Throwable e) {
+                Log.e("lowerView", e);
+            }
         } finally {
             q4 = System.currentTimeMillis();
             g3d.releaseTarget();

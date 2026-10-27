@@ -177,8 +177,14 @@ public final class Storage {
                 fc.close();
             }
         } catch (Throwable t) {
+            oom(t);
             return null;
         }
+    }
+
+    /** Нехватка памяти — не ошибка файла: наверх, MC снизит дальность и повторит шаг. */
+    static void oom(Throwable t) {
+        if (t instanceof OutOfMemoryError) throw (OutOfMemoryError) t;
     }
 
     static void writeFile(String url, byte[][] parts) throws IOException {
@@ -428,6 +434,7 @@ public final class Storage {
                     e.load(et);
                     if (!e.removed) l.addEntity(e);
                 } catch (Throwable ex) {
+                    oom(ex);
                     Log.e("entity " + et.getInt("id"), ex);
                     l.rawEntities.addElement(et);
                 }
@@ -453,6 +460,7 @@ public final class Storage {
             saveEntities(l);
             Log.i("saved world " + l.folder);
         } catch (Throwable t) {
+            oom(t);
             Log.e("save", t);
         }
     }
@@ -520,6 +528,7 @@ public final class Storage {
                 fc.close();
             }
         } catch (Throwable t) {
+            oom(t);
             Log.e("chunks.dat", t);
         }
         byte[] ent = readFile(dir + "entities.dat");
@@ -528,6 +537,7 @@ public final class Storage {
                 l.entitiesTag = Nbt.read(ent, 12);
                 loadEntities(l);
             } catch (Throwable t) {
+                oom(t);
                 Log.e("entities.dat", t);
             }
         }

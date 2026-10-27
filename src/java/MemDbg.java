@@ -109,6 +109,17 @@ final class MemDbg {
         t.start();
     }
 
+    /** Режим limit= — натив в хипе тенями (эмуляция телефона). */
+    static boolean limited() {
+        return limit > 0;
+    }
+
+    /** Убрать тени собранных объектов (после gc при нехватке памяти) и собрать их. */
+    static void sweepNow() {
+        sweep();
+        Runtime.getRuntime().gc();
+    }
+
     /** Занято сейчас (с мусором): Java-хип игры + нативные картинки и M3G. */
     static long used() {
         Runtime r = Runtime.getRuntime();

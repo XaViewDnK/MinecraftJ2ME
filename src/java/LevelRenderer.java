@@ -136,7 +136,8 @@ public final class LevelRenderer {
     }
 
     private static void initShared(Image2D terrain) {
-        keepPool = BtNet.onLoader();
+        // режим limit= отладки памяти эмулирует телефон: пул ограничен и чистится при нехватке памяти
+        keepPool = BtNet.onLoader() && !MemDbg.limited();
         terrainTex = new Texture2D(terrain);
         terrainTex.setFiltering(Texture2D.FILTER_BASE_LEVEL, Texture2D.FILTER_NEAREST);
         terrainTex.setWrapping(Texture2D.WRAP_CLAMP, Texture2D.WRAP_CLAMP);
@@ -214,20 +215,57 @@ public final class LevelRenderer {
             }
     }
 
+    /** Мир закрыт: меши — в пул, рендерер больше не держит ни их, ни мир. */
+    static void release() {
+        if (current == null) return;
+        current.retireAll();
+        current = null;
+    }
+
+    /** Нехватка памяти: части из пула — сборщику мусора (в J2ME Loader нельзя, см. keepPool). */
+    static void trimPool() {
+        if (keepPool || pool == null) return;
+        for (int i = 0; i < pool.length; i++) pool[i].removeAllElements();
+        pooledVerts = 0;
+    }
+
+    /** столбец, секция или склейка которого сейчас строятся (-1 — никакой) */
+    private int busy = -1;
+
+    /**
+     * После нехватки памяти: оборванная постройка столбца (секция без квадов, склейка без части мешей) — столбец
+     * забыть и построить заново, готовые части оборванной склейки — в пул.
+     */
+    void oomCleanup() {
+        for (int i = 0; i < nParts; i++) {
+            if (parts[i] != null) retirePart(0, parts[i]);
+            parts[i] = null;
+        }
+        nParts = 0;
+        cVerts = 0;
+        int g = busy;
+        busy = -1;
+        if (g < 0 || !inRange[g]) return;
+        drop(g);
+        inRange[g] = true;
+        for (int sy = 0; sy < SY; sy++) markDirty(g & 15, sy, g >> 4);
+    }
+
     private static void retire(int k, Part[] ps) {
         if (ps == null) return;
-        for (int i = 0; i < ps.length; i++) {
-            Part p = ps[i];
-            root[k].removeChild(p.mesh);
-            if (p.on) {
-                p.on = false;
-                p.mesh.setRenderingEnable(false);
-            }
-            // на телефонах лишние части — сборщику мусора (в J2ME Loader финализация M3G роняет процесс)
-            if (!keepPool && pooledVerts + CAPS[p.cls] > POOL_LIMIT) continue;
-            pooledVerts += CAPS[p.cls];
-            pool[p.key].addElement(p);
+        for (int i = 0; i < ps.length; i++) retirePart(k, ps[i]);
+    }
+
+    private static void retirePart(int k, Part p) {
+        root[k].removeChild(p.mesh);
+        if (p.on) {
+            p.on = false;
+            p.mesh.setRenderingEnable(false);
         }
+        // на телефонах лишние части — сборщику мусора (в J2ME Loader финализация M3G роняет процесс)
+        if (!keepPool && pooledVerts + CAPS[p.cls] > POOL_LIMIT) return;
+        pooledVerts += CAPS[p.cls];
+        pool[p.key].addElement(p);
     }
 
     public void allDirty() {
@@ -406,6 +444,7 @@ public final class LevelRenderer {
         }
         built[i] = true;
         lost[i] = false;
+        busy = i & 255;
         int sx = i & 15, sz = (i >> 4) & 15, sy = i >> 8;
         for (int k = 0; k < NM; k++) mb[k].clear();
         long t0 = Prof.t();
@@ -435,6 +474,7 @@ public final class LevelRenderer {
         }
         if (quiet[i]) quiet[i] = false;
         else grpDirty[group(sx, sz)] = true;
+        busy = -1;
     }
 
     private boolean isNear(int g) {
@@ -510,6 +550,7 @@ public final class LevelRenderer {
             int i = g | (sy << 8);
             if (lost[i] || (dirty[i] && sP[0][i] == null && sP[1][i] == null && (sVerts[0][i] | sVerts[1][i]) != 0)) rebuild(i);
         }
+        busy = g;
         grpDirty[g] = false;
         grpRecolor[g] = false;
         if (cPos == null) {
@@ -578,11 +619,13 @@ public final class LevelRenderer {
                 root[k].addChild(ps[i].mesh);
                 parts[i] = null;
             }
+            nParts = 0;
             gpart[k][g] = ps;
         }
         grpY0[g] = y0 < 99 ? y0 * 16 : 0;
         grpY1[g] = y1 >= 0 ? y1 * 16 + 16 : 0;
         if (!isNear(g)) forget(g);
+        busy = -1;
     }
 
     /** яркость по коду света при текущем skyDarken и затенению */

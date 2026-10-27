@@ -345,7 +345,11 @@ public final class OptionsScreen extends Screen {
         v = Mth.clamp(v, inMin(i), inMax(i));
         if (v == inValue(i)) return;
         if (i == 4) Options.graphics = v;
-        else Options.viewChunks = v;
+        else {
+            Options.viewChunks = v;
+            // игрок сам выбрал дальность — счёт снижений из-за нехватки памяти заново
+            mc.viewCut = 0;
+        }
         mc.applyOptions();
         setupPositions();
     }
