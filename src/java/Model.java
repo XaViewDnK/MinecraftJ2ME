@@ -119,7 +119,9 @@ public final class Model {
             k += p.pos.length / 3;
         }
         pa = new VertexArray(verts, 3, 2);
+        if (MemDbg.on) MemDbg.va(pa, "Model.pa");
         ta = new VertexArray(verts, 2, 2);
+        if (MemDbg.on) MemDbg.va(ta, "Model.ta");
         ta.set(0, verts, muv);
         vb = new VertexBuffer();
         vb.setPositions(pa, 1f / 64f, null); // 1/4 пикселя модели -> 1/64 блока
@@ -201,6 +203,7 @@ public final class Model {
         if (slots.size() == 0) models.addElement(this);
         Slot s = new Slot();
         s.pa = new VertexArray(verts, 3, 2);
+        if (MemDbg.on) MemDbg.va(s.pa, "Model.pa");
         s.vb = new VertexBuffer();
         s.vb.setPositions(s.pa, 1f / 64f, null);
         s.vb.setTexCoords(0, ta, 1f / (texW * 4f), null);

@@ -445,12 +445,14 @@ public final class Gui {
         int ai = (int) (ra * 16 + 0.5f);
         if (ai > 0) {
             if (rings[ai] == null) rings[ai] = circle(r, 0.95f, ((ai * 255 / 16) << 24) | 0xFFFFFF);
+            if (MemDbg.on) MemDbg.drawn(rings[ai]);
             g.drawImage(rings[ai], x - r, y - r, Graphics.TOP | Graphics.LEFT);
         }
         if (progress > 0) {
             int st = Math.min(10, (int) (progress * 10));
             if (discs[st] == null) discs[st] = circle(Math.max(1, (int) (r * 0.95f * (0.5f + st * 0.05f))), 0f, 0x80FFFFFF);
             Image d = discs[st];
+            if (MemDbg.on) MemDbg.drawn(d);
             g.drawImage(d, x - d.getWidth() / 2, y - d.getHeight() / 2, Graphics.TOP | Graphics.LEFT);
         }
     }
@@ -464,6 +466,8 @@ public final class Gui {
                 float dx = x + 0.5f - r, dy = y + 0.5f - r, q = dx * dx + dy * dy;
                 if (q <= r2 && q >= i2) p[y * d + x] = argb;
             }
-        return Image.createRGBImage(p, d, d, true);
+        Image im = Image.createRGBImage(p, d, d, true);
+        if (MemDbg.on) MemDbg.img(im, "Gui.circle");
+        return im;
     }
 }

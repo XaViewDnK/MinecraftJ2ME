@@ -61,6 +61,7 @@ public final class HandRenderer {
         ItemMeshes.modelBox(b, -3, -2, -2, 4, 12, 4, 40, 16);
         int n = b.verts;
         VertexArray pa = new VertexArray(n, 3, 2);
+        if (MemDbg.on) MemDbg.va(pa, "HandRenderer.pa");
         pa.set(0, n, b.pos);
         // v в char.png (высота 32) — в тех же единицах, что u (ширина 64)
         short[] uv = new short[n * 2];
@@ -69,6 +70,7 @@ public final class HandRenderer {
             uv[i * 2 + 1] = (short) (b.uv[i * 2 + 1] * 2);
         }
         VertexArray ta = new VertexArray(n, 2, 2);
+        if (MemDbg.on) MemDbg.va(ta, "HandRenderer.ta");
         ta.set(0, n, uv);
         armVb = new VertexBuffer();
         armVb.setPositions(pa, 1f / 16f, null);
@@ -229,10 +231,12 @@ public final class HandRenderer {
         if (fxVb == null) {
             short[] pos = { -1, -1, 0, 1, -1, 0, -1, 1, 0, 1, 1, 0 };
             VertexArray pa = new VertexArray(4, 3, 2);
+            if (MemDbg.on) MemDbg.va(pa, "HandRenderer.pa");
             pa.set(0, 4, pos);
             fxVb = new VertexBuffer();
             fxVb.setPositions(pa, 1f, null);
             fxIb = new TriangleStripArray(0, new int[] { 4 });
+            if (MemDbg.on) MemDbg.ib(fxIb, "HandRenderer.fxIb");
             fxApp = new Appearance();
             fxApp.setTexture(0, terrainApp.getTexture(0));
             CompositingMode cm = new CompositingMode();
@@ -280,7 +284,10 @@ public final class HandRenderer {
         fxUv[4] = (short) ul; fxUv[5] = (short) vt;
         fxUv[6] = (short) ur; fxUv[7] = (short) vt;
         // один массив на все вызовы: M3G-объекты не должны становиться мусором (см. DynMesh)
-        if (fxTa == null) fxTa = new VertexArray(4, 2, 2);
+        if (fxTa == null) {
+            fxTa = new VertexArray(4, 2, 2);
+            if (MemDbg.on) MemDbg.va(fxTa, "HandRenderer.fxTa");
+        }
         fxTa.set(0, 4, fxUv);
         fxVb.setTexCoords(0, fxTa, 1f / 256f, null);
     }

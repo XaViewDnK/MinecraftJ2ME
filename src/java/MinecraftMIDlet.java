@@ -7,6 +7,10 @@ public class MinecraftMIDlet extends MIDlet {
 
     protected void startApp() {
         if (mc == null) {
+            if (MemDbg.on) {
+                MemDbg.boot();
+                MemDbg.mark("boot");
+            }
             mc = new MC(this);
             Display.getDisplay(this).setCurrent(mc);
             mc.start();

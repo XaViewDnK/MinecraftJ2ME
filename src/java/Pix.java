@@ -145,12 +145,16 @@ public final class Pix {
         if (bOff == null) {
             byte[] pb = new byte[pal.length * 4];
             for (int i = 0; i < pal.length; i++) put(pb, i * 4, pal[i]);
-            return new Image2D(Image2D.RGBA, w, h, idx, pb);
+            Image2D im = new Image2D(Image2D.RGBA, w, h, idx, pb);
+            if (MemDbg.on) MemDbg.i2d(im, "Pix.pal" + pal.length, w * h + pb.length, idx, pb);
+            return im;
         }
         byte[] b = new byte[w * h * 4];
         for (int y = 0, o = 0; y < h; y++)
             for (int x = 0; x < w; x++, o += 4) put(b, o, get(x, y));
-        return new Image2D(Image2D.RGBA, w, h, b);
+        Image2D im = new Image2D(Image2D.RGBA, w, h, b);
+        if (MemDbg.on) MemDbg.i2d(im, "Pix.rgba", b.length, b, null);
+        return im;
     }
 
     private static void put(byte[] b, int o, int c) {

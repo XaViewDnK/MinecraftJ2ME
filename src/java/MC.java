@@ -113,6 +113,7 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
             rotBuf = null;
             rotBuf = Image.createImage(w, h);
             rotG = rotBuf.getGraphics();
+            if (MemDbg.on) MemDbg.img(rotBuf, "MC.rotBuf");
         }
         applySize(w, h);
     }
@@ -128,6 +129,7 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
 
     /** Вывести кадр: буфер поворота — на холст с поворотом, затем flushGraphics. */
     private void present(Graphics g) {
+        if (rotated && MemDbg.on) MemDbg.drawn(rotBuf);
         if (rotated) g.drawRegion(rotBuf, 0, 0, W, H, Sprite.TRANS_ROT90, 0, 0, Graphics.TOP | Graphics.LEFT);
         flushGraphics();
     }
@@ -445,6 +447,7 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
             Storage.init();
             initDone = true;
             setScreen(new StartMenuScreen());
+            if (MemDbg.on) MemDbg.mark("menu");
             debugScreen();
         } catch (Throwable t) {
             Log.e("init", t);
@@ -523,6 +526,7 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
         if (screen != null) screen.tick();
         if (level == null) return;
         gui.tick();
+        if (MemDbg.on && ++memTicks == 200) MemDbg.mark("game");
         // в сетевой игре мир не встаёт на паузу (в 0.6.1 пауза не останавливает мир вовсе)
         if (screen != null && screen.pausesGame() && !Net.keepsRunning()) return;
         long p0 = Prof.t();
@@ -566,13 +570,19 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
         if (createCooldown > 0) createCooldown--;
         if (missTime > 0) missTime--;
         if (signs != null && ticks % 200 == 0) signs.forget(level);
+        // пиксели текстур интерфейса, не нужные 20 с (всё нужное уже в кэшах кусков), — выгрузить
+        if (ticks % 400 == 0) R.dropTextures(20000);
     }
 
     // ---- мир ----
 
     public void createWorld(String name, long seed, int gameType) {
+        // пик памяти — генерация: пиксели текстур интерфейса пока не нужны
+        R.dropTextures(0);
+        if (MemDbg.on) MemDbg.mark("create");
         Graphics g = getGraphics();
         Level l = new Level();
+        if (MemDbg.on) MemDbg.mark("level");
         l.name = name;
         l.seed = seed;
         l.gameType = gameType;
@@ -581,26 +591,33 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
         final Graphics fg = g;
         long g0 = System.currentTimeMillis();
         Gen gen = new Gen(l, seed);
+        if (MemDbg.on) MemDbg.mark("gen0");
         gen.generate(new Gen.Progress() {
             public void progress(String stage, int pct) {
+                if (MemDbg.on && (pct == 45 || pct == 92 || pct == 100)) MemDbg.mark("gen" + pct);
                 drawLoading(fg, "Building terrain", pct);
             }
         });
+        gen = null;
+        if (MemDbg.on) MemDbg.mark("gendone");
         Player p = new Player(l, gameType == 1);
         p.respawn();
         long g1 = System.currentTimeMillis();
         drawLoading(g, "Saving chunks", 100);
         if (Storage.init()) Storage.saveAll(l, p);
+        if (MemDbg.on) MemDbg.mark("saved");
         Log.i("GEN " + (g1 - g0) + " ms, save " + (System.currentTimeMillis() - g1) + " ms, " + memInfo(l));
         startGame(l, p);
     }
 
     public void loadWorld(String folder) {
+        R.dropTextures(0);
         Graphics g = getGraphics();
         drawLoading(g, "Building terrain", -1);
         long t0 = System.currentTimeMillis();
         Level l = Storage.load(folder);
         loadMs = System.currentTimeMillis() - t0;
+        if (MemDbg.on) MemDbg.mark("loaded");
         if (l == null) {
             Log.last = "Can't load " + folder;
             setScreen(new SelectWorldScreen());
@@ -616,6 +633,7 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
     }
 
     long loadMs;
+    private int memTicks;
 
     /** занятый хип и размер слоёв мира (КБ) — для замеров памяти */
     static String memInfo(Level l) {
@@ -639,6 +657,7 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
         l.gameType = gameType;
         l.folder = null;
         l.isClientSide = true;
+        R.dropTextures(0);
         final Graphics fg = g;
         new Gen(l, seed).generate(new Gen.Progress() {
             public void progress(String stage, int pct) {
@@ -756,6 +775,7 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
         l.player = p;
         l.updateSkyDarken();
         lr = new LevelRenderer(l, R.terrain2D);
+        if (MemDbg.on) MemDbg.mark("lr");
         takes.removeAllElements();
         // рендереры сущностей, руки и табличек живут между мирами: их M3G-объекты не должны становиться мусором
         // (в JL-Mod финализация M3G-объектов не синхронизирована с потоком игры, см. DynMesh)
@@ -778,6 +798,8 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
         Log.i("LOAD read " + loadMs + " ms, prepare " + (System.currentTimeMillis() - t0) + " ms, left " + lr.pendingCount() + "/" + total
                 + ", " + memInfo(l));
         loadMs = 0;
+        if (MemDbg.on) MemDbg.mark("prepared");
+        memTicks = 0;
         setScreen(null);
         if (p.loadSleeping) {
             p.loadSleeping = false;

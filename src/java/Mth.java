@@ -2,8 +2,13 @@
 public final class Mth {
     public static final float PI = 3.1415927f;
     public static final float DEG = PI / 180f;
-    /** Mth::_sin 0.6.1 — общая с генератором мира (Gen.msin), одна таблица на 256 КБ вместо двух */
-    static final float[] SIN = new float[65536];
+    /**
+     * Mth::_sin 0.6.1 (общая с генератором мира, Gen.msin): значение i — (float) Math.sin(i / scale), как в таблице
+     * из 65536 float. Таблица занимала 256 КБ; теперь значения считаются по запросу и кэшируются (4096 ячеек по
+     * long: номер | биты float) — те же самые биты, детерминизм не меняется.
+     */
+    private static final float SIN_SCALE = 65536.0f / (2.0f * PI);
+    private static final long[] SINC = new long[4096];
     private static final java.util.Random RND = new java.util.Random();
 
     /** 0..1, замена Math.random() (её нет в CLDC). */
@@ -21,17 +26,21 @@ public final class Mth {
         return RND.nextLong();
     }
 
-    static {
-        float scale = 65536.0f / (2.0f * PI);
-        for (int i = 0; i < 65536; i++) SIN[i] = (float) Math.sin(i / scale);
+    /** элемент таблицы _sin (i — уже & 65535) */
+    static float sinI(int i) {
+        long c = SINC[i & 4095];
+        if ((int) (c >>> 32) == (i | 0x10000)) return Float.intBitsToFloat((int) c);
+        float v = (float) Math.sin(i / SIN_SCALE);
+        SINC[i & 4095] = ((long) (i | 0x10000) << 32) | (Float.floatToIntBits(v) & 0xFFFFFFFFL);
+        return v;
     }
 
     public static float sin(float a) {
-        return SIN[(int) (a * 10430.378f) & 65535];
+        return sinI((int) (a * 10430.378f) & 65535);
     }
 
     public static float cos(float a) {
-        return SIN[(int) (a * 10430.378f + 16384f) & 65535];
+        return sinI((int) (a * 10430.378f + 16384f) & 65535);
     }
 
     public static int floor(float v) {

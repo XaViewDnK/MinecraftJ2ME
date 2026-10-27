@@ -85,7 +85,8 @@ public final class LevelRenderer {
     private static java.util.Vector[] pool;
     /** вершин в пуле; вне J2ME Loader лишнее отдаётся сборщику мусора */
     private static int pooledVerts;
-    private static final int POOL_LIMIT = 48 * 1024;
+    /** запас частей в пуле на телефонах: 16K вершин ~ 128 КБ M3G (было 48K ~ 384 КБ) */
+    private static final int POOL_LIMIT = 16 * 1024;
     private static boolean keepPool;
     /** классы ёмкости частей (кратны 4, шаг ~1/8) */
     private static int[] CAPS;
@@ -696,8 +697,11 @@ public final class LevelRenderer {
             part.key = key;
             part.comps = nc;
             part.pa = new VertexArray(cap, 3, bytes ? 1 : 2);
+            if (MemDbg.on) MemDbg.va(part.pa, "LevelRenderer.pa");
             part.ca = new VertexArray(cap, nc, 1);
+            if (MemDbg.on) MemDbg.va(part.ca, "LevelRenderer.ca");
             part.ta = new VertexArray(cap, 2, uvBytes ? 1 : 2);
+            if (MemDbg.on) MemDbg.va(part.ta, "LevelRenderer.ta");
             part.info = new short[cap >> 2];
             if (uvBytes) part.uvBias = new float[2];
             part.vb = new VertexBuffer();
@@ -1494,14 +1498,17 @@ public final class LevelRenderer {
         for (int f = 0; f < 6; f++) chestFace(m, f, Tile.getTex(Tile.CHEST, f, d));
         if (chestPos == null) {
             chestPos = new VertexArray(24, 3, 2);
+            if (MemDbg.on) MemDbg.va(chestPos, "LevelRenderer.chestPos");
             chestPos.set(0, 24, m.pos);
             chestCol = new VertexArray(24, 4, 1);
+            if (MemDbg.on) MemDbg.va(chestCol, "LevelRenderer.chestCol");
             chestVb = new VertexBuffer();
             chestVb.setPositions(chestPos, 1f / CU, null);
             chestVb.setColors(chestCol);
             chestIb = MeshBuilder.strips(24);
         }
         VertexArray ta = new VertexArray(24, 2, 2);
+        if (MemDbg.on) MemDbg.va(ta, "LevelRenderer.chestUv");
         ta.set(0, 24, m.uv);
         chestUv[d] = ta;
         return ta;

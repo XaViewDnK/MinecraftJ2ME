@@ -217,15 +217,14 @@ public final class Gen {
     }
 
     // Mth::sin/cos 0.6.1: таблица из 65536 float, _sin[i] = sin(i / _sinScale) — та же, что у Mth
-    private static final float[] SIN = Mth.SIN;
     private static final float SIN_SCALE = 65536.0f / (2.0f * Mth.PI);
 
     static float msin(float x) {
-        return SIN[(int) (x * SIN_SCALE) & 65535];
+        return Mth.sinI((int) (x * SIN_SCALE) & 65535);
     }
 
     static float mcos(float x) {
-        return SIN[(int) (x * SIN_SCALE + 65536 / 4) & 65535];
+        return Mth.sinI((int) (x * SIN_SCALE + 65536 / 4) & 65535);
     }
 
     // ================= биомы =================
@@ -384,7 +383,9 @@ public final class Gen {
     private boolean instaTick, noNeighborUpdate;
     private boolean spawnMobs;
     /** отложенные тики (гравий руд, «разбуженная» вода) — в оригинале срабатывают в первые тики игры */
-    private int[] heavy = new int[1024];
+    private int[][] heavy = new int[16][];
+    /** страница очереди — 4096 позиций; страницы не копируются при росте (раньше int[] удваивался: 1 МБ -> 2 МБ с копией) */
+    private static final int HEAVY_SHIFT = 12;
     private byte[] chunkBuf = new byte[32768];
     private int heavyN;
 
@@ -562,14 +563,15 @@ public final class Gen {
             return;
         }
         if (id == 12 || id == 13 || id == 8 || id == 10) {
-            if (heavyN + 3 > heavy.length) {
-                int[] n = new int[heavy.length * 2];
-                System.arraycopy(heavy, 0, n, 0, heavyN);
+            int pg = heavyN >> HEAVY_SHIFT;
+            if (pg == heavy.length) {
+                int[][] n = new int[pg * 2][];
+                System.arraycopy(heavy, 0, n, 0, pg);
                 heavy = n;
             }
-            heavy[heavyN++] = x;
-            heavy[heavyN++] = y;
-            heavy[heavyN++] = z;
+            if (heavy[pg] == null) heavy[pg] = new int[1 << HEAVY_SHIFT];
+            // x, y, z по 10 бит со знаком в одном int (координаты мира 0..255, y 0..127)
+            heavy[pg][heavyN++ & ((1 << HEAVY_SHIFT) - 1)] = ((x & 1023) << 20) | ((y & 1023) << 10) | (z & 1023);
         }
     }
 
@@ -832,8 +834,9 @@ public final class Gen {
         step++;
         int n = heavyN;
         instaTick = true;
-        for (int i = 0; i < n; i += 3) {
-            int x = heavy[i], y = heavy[i + 1], z = heavy[i + 2], t = getTile(x, y, z);
+        for (int i = 0; i < n; i++) {
+            int v = heavy[i >> HEAVY_SHIFT][i & ((1 << HEAVY_SHIFT) - 1)];
+            int x = v << 2 >> 22, y = v << 12 >> 22, z = v << 22 >> 22, t = getTile(x, y, z);
             if (t == 12 || t == 13) checkSlide(x, y, z, t);
             else if (t == 8 || t == 10) liquidTick(x, y, z, t, levelRandom);
         }

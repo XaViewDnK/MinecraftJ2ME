@@ -1,4 +1,6 @@
+import java.lang.ref.WeakReference;
 import java.util.Hashtable;
+import java.util.Vector;
 import javax.microedition.lcdui.*;
 import javax.microedition.m3g.Image2D;
 
@@ -26,23 +28,79 @@ public final class R {
      */
     public static final class Tex {
         public final int id, w, h;
-        final Pix pix;
+        /** пиксели; у текстур из файла (path) или производных (atOf) выгружаются, когда не нужны (dropTextures) */
+        private Pix pix;
+        private final String path;
+        /** производная от gui.png: alpha-test для хотбара */
+        private final Tex atOf;
+        private long used;
+        /** нужна HUD в игре — по простою не выгружается (перезагрузка png 256x256 — всплеск ~0.5 МБ) */
+        boolean hud;
 
         Tex(Pix pix) {
+            this(pix, null, null);
+        }
+
+        private Tex(Pix pix, String path, Tex atOf) {
             this.pix = pix;
+            this.path = path;
+            this.atOf = atOf;
             this.w = pix.w;
             this.h = pix.h;
             id = ++texIds;
+            used = System.currentTimeMillis();
+            if (path != null || atOf != null) texs.addElement(new WeakReference(this));
+        }
+
+        Pix pix() {
+            used = System.currentTimeMillis();
+            if (pix == null) pix = path != null ? new Pix(img(path)) : alphaTested(atOf);
+            return pix;
         }
 
         /** пиксели ARGB прямоугольника (x, y, rw, rh) */
         int[] region(int x, int y, int rw, int rh) {
-            return pix.region(x, y, rw, rh);
+            return pix().region(x, y, rw, rh);
         }
     }
 
+    /** выгружаемые текстуры (слабые ссылки: экраны держат свои Tex сами) */
+    private static final Vector texs = new Vector();
+
     public static Tex tex(String path) {
-        return new Tex(new Pix(img(path)));
+        return new Tex(new Pix(img(path)), path, null);
+    }
+
+    /** хотбар рисуется без смешивания, с alpha-test: полупрозрачное — непрозрачно, прозрачное — дырка */
+    private static Pix alphaTested(Tex t) {
+        int[] at = t.region(0, 0, t.w, t.h);
+        for (int i = 0; i < at.length; i++) at[i] = (at[i] >>> 24) > 25 ? at[i] | 0xFF000000 : 0;
+        return new Pix(at, t.w, t.h);
+    }
+
+    /**
+     * Выгрузить пиксели текстур интерфейса (всех или не нужных дольше idleMs) и кэши кусков из них — перед созданием
+     * и загрузкой мира (пик памяти) и в игре. Нужное снова загрузится из png при первом рисовании.
+     */
+    public static void dropTextures(long idleMs) {
+        long now = System.currentTimeMillis();
+        boolean any = false;
+        for (int i = texs.size() - 1; i >= 0; i--) {
+            Tex t = (Tex) ((WeakReference) texs.elementAt(i)).get();
+            if (t == null) texs.removeElementAt(i);
+            else if (t.pix != null && now - t.used >= idleMs && (idleMs == 0 || !t.hud)) {
+                t.pix = null;
+                any = true;
+            }
+        }
+        if (idleMs == 0) {
+            blitCache.clear();
+            stretchCache.clear();
+            iconCache.clear();
+            mapCache.clear();
+            tileCache.clear();
+        }
+        if (any && MemDbg.on) Log.i("MEM textures dropped (idle " + idleMs + ")");
     }
 
     private static final Hashtable image2D = new Hashtable();
@@ -55,7 +113,7 @@ public final class R {
         Image2D im = (Image2D) image2D.get(path);
         if (im == null) {
             if (path.equals("/terrain.png")) im = terrain2D;
-            else if (path.equals("/gui/items.png")) im = items.pix.image2D();
+            else if (path.equals("/gui/items.png")) im = items.pix().image2D();
             else if (path.equals("/font/default8.png")) im = font.image2D();
             else im = new Pix(img(path)).image2D();
             image2D.put(path, im);
@@ -65,16 +123,14 @@ public final class R {
 
     public static void load() {
         terrain = tex("/terrain.png");
-        terrain2D = terrain.pix.image2D();
+        terrain2D = terrain.pix().image2D();
         gui = tex("/gui/gui.png");
-        // хотбар рисуется без смешивания, с alpha-test: полупрозрачное — непрозрачно, прозрачное — дырка
-        int[] at = gui.region(0, 0, gui.w, gui.h);
-        for (int i = 0; i < at.length; i++) at[i] = (at[i] >>> 24) > 25 ? at[i] | 0xFF000000 : 0;
-        guiAT = new Tex(new Pix(at, gui.w, gui.h));
-        at = null;
+        guiAT = new Tex(alphaTested(gui), null, gui);
+        terrain.hud = gui.hud = guiAT.hud = true;
         dots = tex("/gui/dots.png");
         icons = tex("/gui/icons.png");
         items = tex("/gui/items.png");
+        icons.hud = items.hud = true;
         touch = tex("/gui/touchgui.png");
         sheet = tex("/gui/spritesheet.png");
         title = tex("/gui/title.png");
@@ -130,7 +186,9 @@ public final class R {
 
     public static Image img(String path) {
         try {
-            return Image.createImage(path);
+            Image im = Image.createImage(path);
+            if (MemDbg.on) MemDbg.img(im, "R.img" + path);
+            return im;
         } catch (Exception e) {
             Log.e("img " + path, e);
             return Image.createImage(1, 1);
@@ -205,9 +263,11 @@ public final class R {
                 }
             }
             im = Image.createRGBImage(out, sw, sh, true);
+            if (MemDbg.on) MemDbg.img(im, "R.blit#" + t.id);
             if (blitCache.size() > 300) blitCache.clear();
             blitCache.put(key, im);
         }
+        if (MemDbg.on) MemDbg.drawn(im);
         g.drawImage(im, px(x), px(y), Graphics.TOP | Graphics.LEFT);
     }
 
@@ -253,9 +313,11 @@ public final class R {
                 }
             }
             im = Image.createRGBImage(out, W, H, true);
+            if (MemDbg.on) MemDbg.img(im, "R.stretch");
             if (cache.size() > 600) cache.clear();
             cache.put(key, im);
         }
+        if (MemDbg.on) MemDbg.drawn(im);
         g.drawImage(im, X, Y, Graphics.TOP | Graphics.LEFT);
     }
 
@@ -335,6 +397,7 @@ public final class R {
                     d[y * 32 + x] = 0xFF000000 | (r << 16) | (gg << 8) | bb;
                 }
             tile = scaleImage(d, 32, 32, k);
+            if (MemDbg.on) MemDbg.img(tile, "R.dirt");
             T = tile.getWidth();
             dirtCache.put(key, tile);
         }
@@ -348,6 +411,7 @@ public final class R {
             if (y + T <= Y0) continue;
             for (int x = -ox; x < X1; x += T) {
                 if (x + T <= X0) continue;
+                if (MemDbg.on) MemDbg.drawn(tile);
                 g.drawImage(tile, x, y, Graphics.TOP | Graphics.LEFT);
             }
         }
@@ -414,6 +478,7 @@ public final class R {
                 }
             }
             im = Image.createRGBImage(p, sw, sh, true);
+            if (MemDbg.on) MemDbg.img(im, "R.glyph");
             if (glyphCache.size() > 600) glyphCache.clear();
             glyphCache.put(key, im);
         }
@@ -449,7 +514,11 @@ public final class R {
                 int u = (c & 15) * 8, v = (c >> 4) * 8;
                 int su = (int) (u * kk + 0.5f), sv = (int) (v * kk + 0.5f);
                 int sw = (int) ((u + w) * kk + 0.5f) - su, sh = (int) ((v + 8) * kk + 0.5f) - sv;
-                if (sw > 0 && sh > 0) g.drawImage(glyph(c, color, fs, su, sv, sw, sh, m), px(x + adv * fs), Y, Graphics.TOP | Graphics.LEFT);
+                if (sw > 0 && sh > 0) {
+                    Image gi = glyph(c, color, fs, su, sv, sw, sh, m);
+                    if (MemDbg.on) MemDbg.drawn(gi);
+                    g.drawImage(gi, px(x + adv * fs), Y, Graphics.TOP | Graphics.LEFT);
+                }
             }
             adv += charW[c];
         }
@@ -540,9 +609,11 @@ public final class R {
                 p[i] = c;
             }
             im = Image.createRGBImage(p, N, N, true);
+            if (MemDbg.on) MemDbg.img(im, "R.icon");
             if (iconCache.size() > 200) iconCache.clear();
             iconCache.put(key, im);
         }
+        if (MemDbg.on) MemDbg.drawn(im);
         g.drawImage(im, px(x), px(y), Graphics.TOP | Graphics.LEFT);
     }
 

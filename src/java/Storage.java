@@ -301,8 +301,18 @@ public final class Storage {
         t.putList("Entities", ents);
         t.putList("TileEntities", tes);
         byte[] nbt = Nbt.write(t);
+        dropLists(t);
         String dir = base + l.folder + "/";
         writeFile(dir + "entities.dat", new byte[][] { new byte[] { 'E', 'N', 'T', 0 }, le(1), le(nbt.length), nbt });
+    }
+
+    /**
+     * entitiesTag держится ради прочих ключей entities.dat; списки сущностей в нём — копия того, что уже в мире
+     * (до 70 КБ), — заменить пустыми (ключи и их порядок те же, при сохранении списки пишутся заново).
+     */
+    private static void dropLists(Nbt.Compound t) {
+        if (t.map.containsKey("Entities")) t.putList("Entities", new Nbt.NList(Nbt.COMPOUND));
+        if (t.map.containsKey("TileEntities")) t.putList("TileEntities", new Nbt.NList(Nbt.COMPOUND));
     }
 
     /** Разобрать entities.dat в сущности мира. */
@@ -338,6 +348,7 @@ public final class Storage {
                 if (Level.inside(te.x, te.y, te.z)) l.setTileEntity(te);
             }
         }
+        dropLists(t);
     }
 
     public static void saveAll(Level l, Player p) {

@@ -127,10 +127,13 @@ public final class MeshBuilder {
     public VertexBuffer build(float ox, float oy, float oz) {
         if (verts == 0) return null;
         VertexArray pa = new VertexArray(verts, 3, 2);
+        if (MemDbg.on) MemDbg.va(pa, "MeshBuilder.pa");
         pa.set(0, verts, pos);
         VertexArray ca = new VertexArray(verts, 4, 1);
+        if (MemDbg.on) MemDbg.va(ca, "MeshBuilder.ca");
         ca.set(0, verts, col);
         VertexArray ta = new VertexArray(verts, 2, 2);
+        if (MemDbg.on) MemDbg.va(ta, "MeshBuilder.ta");
         ta.set(0, verts, uv);
         VertexBuffer vb = new VertexBuffer();
         vb.setPositions(pa, 1f / 16f, new float[] { ox, oy, oz });
@@ -155,6 +158,7 @@ public final class MeshBuilder {
         int[] lens = new int[quads];
         System.arraycopy(stripLens, 0, lens, 0, quads);
         t = new TriangleStripArray(0, lens);
+        if (MemDbg.on) MemDbg.ib(t, "MeshBuilder.t");
         stripCache.put(key, t);
         return t;
     }

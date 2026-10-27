@@ -17,6 +17,7 @@ public final class Pal {
     private final int[] stamp = new int[256], slot = new int[256];
     private final int[] pal = new int[256];
     private int st;
+    private int[] exp;
 
     public Pal(int maxBits) {
         this.maxBits = maxBits;
@@ -185,7 +186,9 @@ public final class Pal {
 
     /** чанк в сырой массив файла MCPE */
     public void exportChunk(int ch, byte[] raw, boolean nibbles) {
-        int[] t = new int[CELLS];
+        // свой буфер (сохранение идёт и из потока pauseApp, tmp занят set); раньше — новый int[1024] на каждый чанк и слой: ~4 МБ мусора за сохранение
+        int[] t = exp;
+        if (t == null) exp = t = new int[CELLS];
         for (int py = 0; py < NP; py++) {
             decode((ch << 5) | py, t);
             for (int c = 0; c < CELLS; c++) {

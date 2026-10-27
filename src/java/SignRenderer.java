@@ -59,6 +59,7 @@ public final class SignRenderer {
     private static VertexBuffer modelVb(MeshBuilder b) {
         int n = b.verts;
         VertexArray pa = new VertexArray(n, 3, 2);
+        if (MemDbg.on) MemDbg.va(pa, "SignRenderer.pa");
         pa.set(0, n, b.pos);
         short[] uv = new short[n * 2];
         for (int i = 0; i < n; i++) {
@@ -66,6 +67,7 @@ public final class SignRenderer {
             uv[i * 2 + 1] = (short) (b.uv[i * 2 + 1] * 2);
         }
         VertexArray ta = new VertexArray(n, 2, 2);
+        if (MemDbg.on) MemDbg.va(ta, "SignRenderer.ta");
         ta.set(0, n, uv);
         VertexBuffer vb = new VertexBuffer();
         vb.setPositions(pa, 1f / 16f, null);

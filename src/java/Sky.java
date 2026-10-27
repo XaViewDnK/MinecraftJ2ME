@@ -55,11 +55,13 @@ public final class Sky {
     private static VertexBuffer buildPos(MeshBuilder m, boolean uv) {
         int v = m.verts;
         VertexArray pa = new VertexArray(v, 3, 2);
+        if (MemDbg.on) MemDbg.va(pa, "Sky.pa");
         pa.set(0, v, m.pos);
         VertexBuffer b = new VertexBuffer();
         b.setPositions(pa, 1f, null);
         if (uv) {
             VertexArray ta = new VertexArray(v, 2, 2);
+            if (MemDbg.on) MemDbg.va(ta, "Sky.ta");
             ta.set(0, v, m.uv);
             b.setTexCoords(0, ta, 1f / 2048f, null);
         }

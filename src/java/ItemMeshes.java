@@ -193,8 +193,10 @@ public final class ItemMeshes {
     private static VertexBuffer build(MeshBuilder b, float bias, float posScale, float uvScale) {
         int v = b.verts;
         VertexArray pa = new VertexArray(v, 3, 2);
+        if (MemDbg.on) MemDbg.va(pa, "ItemMeshes.pa");
         pa.set(0, v, b.pos);
         VertexArray ta = new VertexArray(v, 2, 2);
+        if (MemDbg.on) MemDbg.va(ta, "ItemMeshes.ta");
         ta.set(0, v, b.uv);
         VertexBuffer vb = new VertexBuffer();
         vb.setPositions(pa, posScale, new float[] { bias, bias, bias });

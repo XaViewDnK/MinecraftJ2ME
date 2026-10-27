@@ -37,8 +37,13 @@ final class DynMesh {
             while (c < n) c *= 2;
             cap = c;
             pa = new VertexArray(c, 3, 2);
+            if (MemDbg.on) MemDbg.va(pa, "DynMesh.pa");
             ta = new VertexArray(c, 2, 2);
-            if (colors) ca = new VertexArray(c, 4, 1);
+            if (MemDbg.on) MemDbg.va(ta, "DynMesh.ta");
+            if (colors) {
+                ca = new VertexArray(c, 4, 1);
+                if (MemDbg.on) MemDbg.va(ca, "DynMesh.ca");
+            }
         }
         pa.set(0, n, m.pos);
         ta.set(0, n, m.uv);
