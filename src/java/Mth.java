@@ -11,6 +11,16 @@ public final class Mth {
         return RND.nextFloat();
     }
 
+    /** Бенчмарк: фиксированное зерно общего генератора. */
+    static void seed(long s) {
+        RND.setSeed(s);
+    }
+
+    /** Зерно для генератора отдельного объекта (моба) — от общего, чтобы засев общего фиксировал и его. */
+    static long nextSeed() {
+        return RND.nextLong();
+    }
+
     static {
         float scale = 65536.0f / (2.0f * PI);
         for (int i = 0; i < 65536; i++) SIN[i] = (float) Math.sin(i / scale);

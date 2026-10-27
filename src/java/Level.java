@@ -53,6 +53,12 @@ public final class Level {
         randValue = random.nextInt();
     }
 
+    /** Бенчмарк: фиксированные случайные числа мира. */
+    void reseed(long s) {
+        random.setSeed(s);
+        randValue = random.nextInt();
+    }
+
     public static boolean inside(int x, int y, int z) {
         return (x & ~255) == 0 && (z & ~255) == 0 && (y & ~127) == 0;
     }

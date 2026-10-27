@@ -7,7 +7,13 @@ import javax.microedition.rms.RecordStore;
 public final class Options {
     public static String username = "Steve";
     public static boolean serverVisible = true;
-    public static boolean fancyGraphics = true, lowQuality;
+    /** качество графики (вместо флажков 0.6.1 Fancy / Lower graphics quality): 0 Low, 1 Medium, 2 High */
+    public static final int GFX_LOW = 0, GFX_MEDIUM = 1, GFX_HIGH = 2;
+    public static int graphics = GFX_HIGH;
+    public static final String[] GRAPHICS_NAME = { "Low", "Medium", "High" };
+    /** дальность прорисовки в чанках, отдельно от качества графики */
+    public static int viewChunks = 4;
+    public static final int VIEW_MIN = 1, VIEW_MAX = 4;
     /** ползунок 0..100 (ctrl_sensitivity), по умолчанию 50 */
     public static int sensitivitySlider = 50;
     public static boolean invertY, lefty;
@@ -32,13 +38,19 @@ public final class Options {
         return 0.3f + Mth.pow(1.1f * sensitivitySlider / 100f, 1.3f) * 0.42f;
     }
 
-    /** viewDistance 0.6.1: 2 (256 >> 2 = 64 блока), «низкое качество» — 3 (32 блока). */
+    /** В 0.6.1 viewDistance 2 (256 >> 2 = 64 блока), «низкое качество» — 3 (32 блока); здесь — ползунок 1..4 чанка. */
     public static int renderDistance() {
-        return lowQuality ? 32 : 64;
+        return viewChunks * 16;
     }
 
+    /** High — Fancy graphics 0.6.1: прозрачная листва, плоскость неба и облака */
     public static boolean fancy() {
-        return fancyGraphics && !lowQuality;
+        return graphics == GFX_HIGH;
+    }
+
+    /** Low — Lower graphics quality 0.6.1 без укорочения дальности: туман без примеси неба и без светлого порога */
+    public static boolean low() {
+        return graphics == GFX_LOW;
     }
 
     public static void load() {
@@ -56,6 +68,8 @@ public final class Options {
     }
 
     private static void parse(String s) {
+        // старые флажки — только для перевода прежних настроек, если новых ключей ещё нет
+        boolean oldFancy = true, oldLow = false, haveGfx = false, haveView = false;
         int p = 0;
         while (p < s.length()) {
             int e = s.indexOf('\n', p);
@@ -68,8 +82,10 @@ public final class Options {
             boolean b = v.equals("true");
             if (k.equals("mp_username")) username = v;
             else if (k.equals("mp_server_visible_default")) serverVisible = b;
-            else if (k.equals("gfx_fancygraphics")) fancyGraphics = b;
-            else if (k.equals("gfx_lowquality")) lowQuality = b;
+            else if (k.equals("gfx_fancygraphics")) oldFancy = b;
+            else if (k.equals("gfx_lowquality")) oldLow = b;
+            else if (k.equals("gfx_quality")) { graphics = Mth.clamp(num(v, GFX_HIGH), GFX_LOW, GFX_HIGH); haveGfx = true; }
+            else if (k.equals("gfx_viewchunks")) { viewChunks = Mth.clamp(num(v, VIEW_MAX), VIEW_MIN, VIEW_MAX); haveView = true; }
             else if (k.equals("ctrl_sensitivity")) {
                 try { sensitivitySlider = Mth.clamp(Integer.parseInt(v), 0, 100); } catch (Exception ex) { }
             } else if (k.equals("ctrl_invertmouse")) invertY = b;
@@ -93,6 +109,8 @@ public final class Options {
                 for (int i = 0; i < Keys.N; i++) if (Keys.ID[i].equals(id)) Keys.bind[sc][i] = num(v, Keys.bind[sc][i]);
             }
         }
+        if (!haveGfx) graphics = oldLow ? GFX_LOW : (oldFancy ? GFX_HIGH : GFX_MEDIUM);
+        if (!haveView) viewChunks = oldLow ? 2 : 4;
     }
 
     private static int num(String v, int def) {
@@ -108,8 +126,8 @@ public final class Options {
         StringBuffer sb = new StringBuffer();
         sb.append("mp_username:").append(username).append('\n');
         sb.append("mp_server_visible_default:").append(serverVisible).append('\n');
-        sb.append("gfx_fancygraphics:").append(fancyGraphics).append('\n');
-        sb.append("gfx_lowquality:").append(lowQuality).append('\n');
+        sb.append("gfx_quality:").append(graphics).append('\n');
+        sb.append("gfx_viewchunks:").append(viewChunks).append('\n');
         sb.append("ctrl_sensitivity:").append(sensitivitySlider).append('\n');
         sb.append("ctrl_invertmouse:").append(invertY).append('\n');
         sb.append("ctrl_islefthanded:").append(lefty).append('\n');

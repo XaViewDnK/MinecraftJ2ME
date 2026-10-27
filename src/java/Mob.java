@@ -9,7 +9,7 @@ public abstract class Mob extends Entity {
     /** walkAnimPos, walkAnimSpeed */
     public float walkAnim, walkAnimO, walkSpeed, walkSpeedO;
     public float bodyRot, bodyRotO, headRot;
-    protected final Random rnd = new Random();
+    protected final Random rnd = new Random(Mth.nextSeed());
     public float hurtDir;
     private int ambientChance;
     protected Entity lastHurtBy;

@@ -3,7 +3,9 @@ import javax.microedition.lcdui.Graphics;
 
 /**
  * Настройки главного меню. На Android 0.6.1 это MainMenuOptionsActivity (preferences.xml): чёрный список
- * с категориями, флажками и ползунком «Sensitivity». Рисуется системным шрифтом в пикселях экрана;
+ * с категориями, флажками и ползунком «Sensitivity». Флажки графики оригинала (Fancy / Lower graphics quality)
+ * заменены двумя ползунками прямо в строках списка: качество Low/Medium/High и дальность 1..4 чанка
+ * (полоса — касанием, строка — следующее значение, клавиши влево/вправо). Рисуется системным шрифтом в пикселях экрана;
  * стрелка «назад» в заголовке заменяет системную кнопку «Назад».
  */
 public final class OptionsScreen extends Screen {
@@ -13,8 +15,8 @@ public final class OptionsScreen extends Screen {
             { "e", "Username", "" },
             { "b", "Server visible by default", "" },
             { "c", "Graphics" },
-            { "b", "Fancy graphics", "" },
-            { "b", "Lower graphics quality", "Shorter view distance and disables fancy rendering" },
+            { "i", "Graphics", "" },
+            { "i", "Render distance", "" },
             { "c", "Controls" },
             { "s", "Sensitivity", "" },
             { "b", "Invert Y-axis", "" },
@@ -42,6 +44,8 @@ public final class OptionsScreen extends Screen {
     // диалог ползунка
     private boolean slider;
     private int sliderValue, sliderDown = -1; // 0 полоса, 1 Cancel, 2 OK
+    /** ползунок в строке, который сейчас тянут пальцем (-1 — нет) */
+    private int dragItem = -1;
 
     protected void setupPositions() {
         W = mc.W;
@@ -65,6 +69,7 @@ public final class OptionsScreen extends Screen {
                 titleLines[i] = wrap(fTitle, ITEMS[i][1], textW());
                 sumLines[i] = wrap(fSum, summary(i), textW());
                 itemH[i] = fTitle.getHeight() * titleLines[i].length + 2 * pad + 4 + fSum.getHeight() * sumLines[i].length;
+                if (ITEMS[i][0].equals("i")) itemH[i] += inBarH();
             }
             y += itemH[i];
         }
@@ -111,20 +116,21 @@ public final class OptionsScreen extends Screen {
 
     private String summary(int i) {
         if (i == 1) return "'" + Options.username + "'";
+        if (i == 4 || i == 5) return inName(i) + " - " + (i == 4 ? GFX_SUMMARY[Options.graphics] : Options.viewChunks * 16 + " blocks");
         if (i == 18) return Options.ORIENTATION_NAME[Options.orientation];
         return ITEMS[i].length > 2 ? ITEMS[i][2] : "";
     }
 
+    private static final String[] GFX_SUMMARY = { "Fast leaves, no sky and clouds, plain darker fog",
+            "Fast leaves, no sky and clouds", "Fancy leaves, sky and clouds" };
+
     private boolean enabled(int i) {
-        if (i == 4) return !Options.lowQuality;
         return true;
     }
 
     private boolean value(int i) {
         switch (i) {
             case 2: return Options.serverVisible;
-            case 4: return Options.fancyGraphics && !Options.lowQuality;
-            case 5: return Options.lowQuality;
             case 8: return Options.invertY;
             case 9: return Options.lefty;
             case 11: return Options.vibration;
@@ -139,11 +145,6 @@ public final class OptionsScreen extends Screen {
     private void toggle(int i) {
         switch (i) {
             case 2: Options.serverVisible = !Options.serverVisible; break;
-            case 4: Options.fancyGraphics = !Options.fancyGraphics; break;
-            case 5:
-                Options.lowQuality = !Options.lowQuality;
-                if (Options.lowQuality) Options.fancyGraphics = false;
-                break;
             case 8: Options.invertY = !Options.invertY; break;
             case 9: Options.lefty = !Options.lefty; break;
             case 11: Options.vibration = !Options.vibration; break;
@@ -223,6 +224,7 @@ public final class OptionsScreen extends Screen {
         g.setFont(fSum);
         g.setColor(en ? 0xB0B0B0 : 0x707070);
         for (int k = 0; k < sl.length; k++) g.drawString(sl[k], tx, ty + k * fSum.getHeight(), Graphics.TOP | Graphics.LEFT);
+        if (it[0].equals("i")) renderInline(g, i, y);
         if (it[0].equals("b")) {
             int cs = checkSize(), cx = W - 2 * pad - cs, cy = y + (itemH[i] - cs) / 2;
             g.setColor(en ? 0xB0B0B0 : 0x505050);
@@ -296,6 +298,80 @@ public final class OptionsScreen extends Screen {
         sliderValue = Mth.clamp((x - barX) * 100 / Math.max(1, barW), 0, 100);
     }
 
+    private void sliderApply() {
+        Options.sensitivitySlider = sliderValue;
+        Options.save();
+        slider = false;
+    }
+
+    // ---- ползунки в строке списка (Graphics, Render distance) ----
+
+    private static int inMin(int i) {
+        return i == 4 ? Options.GFX_LOW : Options.VIEW_MIN;
+    }
+
+    private static int inMax(int i) {
+        return i == 4 ? Options.GFX_HIGH : Options.VIEW_MAX;
+    }
+
+    private static int inValue(int i) {
+        return i == 4 ? Options.graphics : Options.viewChunks;
+    }
+
+    private static String inName(int i) {
+        return i == 4 ? Options.GRAPHICS_NAME[Options.graphics] : Options.viewChunks + (Options.viewChunks == 1 ? " chunk" : " chunks");
+    }
+
+    /** высота полосы под текстом строки */
+    private int inBarH() {
+        return 4 * pad;
+    }
+
+    private int inBarX0() {
+        return 3 * pad;
+    }
+
+    private int inBarX1() {
+        return W - 3 * pad;
+    }
+
+    /** середина полосы строки i в координатах экрана (с учётом прокрутки) */
+    private int inBarY(int i) {
+        return itemY[i] - scroll + itemH[i] - pad - inBarH() / 2;
+    }
+
+    /** новое значение: применить сразу (дальность и листва — через applyOptions), подписи пересчитать */
+    private void inSet(int i, int v) {
+        v = Mth.clamp(v, inMin(i), inMax(i));
+        if (v == inValue(i)) return;
+        if (i == 4) Options.graphics = v;
+        else Options.viewChunks = v;
+        mc.applyOptions();
+        setupPositions();
+    }
+
+    private void inSetX(int i, int x) {
+        int n = inMax(i) - inMin(i), w = Math.max(1, inBarX1() - inBarX0());
+        inSet(i, inMin(i) + Mth.clamp(((x - inBarX0()) * n * 2 / w + 1) / 2, 0, n));
+    }
+
+    private void renderInline(Graphics g, int i, int y) {
+        int x0 = inBarX0(), x1 = inBarX1(), by = y + itemH[i] - pad - inBarH() / 2;
+        int lo = inMin(i), n = inMax(i) - lo, v = inValue(i) - lo;
+        int tx = x0 + (x1 - x0) * v / n;
+        g.setColor(0x606060);
+        g.fillRect(x0, by - 1, x1 - x0, 3);
+        for (int k = 0; k <= n; k++) {
+            int sx = x0 + (x1 - x0) * k / n;
+            g.setColor(k <= v ? 0x8BC34A : 0x909090);
+            g.fillRect(sx - 1, by - pad / 2, 3, pad);
+        }
+        g.setColor(0x8BC34A);
+        g.fillRect(x0, by - 1, tx - x0, 3);
+        int rr = dragItem == i ? pad * 3 / 2 : pad;
+        g.fillArc(tx - rr, by - rr, 2 * rr, 2 * rr, 0, 360);
+    }
+
     // ---- касания (переводим пиксели GUI обратно в пиксели экрана) ----
 
     protected void mouseClicked(int gx, int gy) {
@@ -304,6 +380,17 @@ public final class OptionsScreen extends Screen {
             sliderDown = sliderHit(x, y);
             if (sliderDown == 0) sliderSet(x);
             return;
+        }
+        // полоса ползунка в строке: палец тянет значение, список не прокручивается
+        for (int i = 0; i < ITEMS.length; i++) {
+            if (!ITEMS[i][0].equals("i") || y < barH) continue;
+            int by = inBarY(i);
+            if (y >= by - inBarH() / 2 - pad && y <= by + inBarH() / 2 + pad && x >= inBarX0() - 2 * pad && x <= inBarX1() + 2 * pad) {
+                dragItem = i;
+                pressedItem = -1;
+                inSetX(i, x);
+                return;
+            }
         }
         downX = x;
         downY = y;
@@ -323,6 +410,10 @@ public final class OptionsScreen extends Screen {
             if (sliderDown == 0) sliderSet(x);
             return;
         }
+        if (dragItem >= 0) {
+            inSetX(dragItem, x);
+            return;
+        }
         if (Math.abs(y - downY) > pad) dragging = true;
         if (dragging) scroll = Mth.clamp(downScroll - (y - downY), 0, maxScroll);
     }
@@ -333,12 +424,15 @@ public final class OptionsScreen extends Screen {
             int d = sliderDown;
             sliderDown = -1;
             if (d > 0 && sliderHit(x, y) == d) {
-                if (d == 2) {
-                    Options.sensitivitySlider = sliderValue;
-                    Options.save();
-                }
+                if (d == 2) sliderApply();
                 slider = false;
             }
+            return;
+        }
+        if (dragItem >= 0) {
+            inSetX(dragItem, x);
+            dragItem = -1;
+            Options.save();
             return;
         }
         if (backDown) {
@@ -368,6 +462,12 @@ public final class OptionsScreen extends Screen {
             if (dir == RIGHT) sliderValue = Math.min(100, sliderValue + 5);
             return;
         }
+        // ползунок в строке: влево/вправо у выделенного пункта
+        if (keyFocus && focusItem >= 0 && ITEMS[focusItem][0].equals("i") && (dir == LEFT || dir == RIGHT)) {
+            inSet(focusItem, inValue(focusItem) + (dir == RIGHT ? 1 : -1));
+            Options.save();
+            return;
+        }
         if (focusItem < 0) focusItem = nextItem(-1, 1);
         else if (keyFocus && (dir == UP || dir == DOWN)) {
             int n = nextItem(focusItem, dir == UP ? -1 : 1);
@@ -385,9 +485,7 @@ public final class OptionsScreen extends Screen {
     public void keyOk(boolean down) {
         if (!down) return;
         if (slider) {
-            Options.sensitivitySlider = sliderValue;
-            Options.save();
-            slider = false;
+            sliderApply();
             return;
         }
         if (!keyFocus || focusItem < 0) {
@@ -418,6 +516,11 @@ public final class OptionsScreen extends Screen {
         else if (ITEMS[i][0].equals("s")) {
             sliderValue = Options.sensitivitySlider;
             slider = true;
+        } else if (ITEMS[i][0].equals("i")) {
+            // тап по строке / OK — следующее значение по кругу (кнопочные телефоны без влево/вправо)
+            int v = inValue(i) + 1;
+            inSet(i, v > inMax(i) ? inMin(i) : v);
+            Options.save();
         } else if (ITEMS[i][0].equals("e")) {
             mc.editText("Enter your username", Options.username, 32, new MC.TextResult() {
                 public void done(String text) {

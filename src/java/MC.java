@@ -467,6 +467,7 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
                     long tt = System.currentTimeMillis();
                     tick();
                     if (Prof.on) Prof.tick(System.currentTimeMillis() - tt);
+                    if (Bench.run != null) Bench.run.tickTime(System.currentTimeMillis() - tt);
                     acc -= 50;
                     n++;
                 }
@@ -478,6 +479,7 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
                 long t3 = System.currentTimeMillis();
                 tTick = (tTick * 7 + (t1 - t0) * 8) / 8;
                 tFlush = (tFlush * 7 + (t3 - t2) * 8) / 8;
+                if (Bench.run != null && level != null) Bench.run.frame(t3);
                 if (Prof.on) {
                     if (t3 - t0 >= 60) Log.i("SPIKE frame " + (t3 - t0) + ": ticks " + n + "x " + (t1 - t0) + " upd " + lastFrame[0] + " bind " + lastFrame[1]
                             + " world " + lastFrame[2] + " ent " + lastFrame[3] + " rel " + lastFrame[4] + " render " + (t2 - t1) + " flush " + (t3 - t2));
@@ -527,6 +529,7 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
         handleTouchTick();
         keyTick();
         player.tick();
+        if (Bench.run != null) Bench.run.tick();
         if (hand != null) hand.tick(player);
         tickSleep();
         long p1 = Prof.t();
@@ -745,7 +748,7 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
         });
     }
 
-    private void startGame(Level l, Player p) {
+    void startGame(Level l, Player p) {
         long t0 = System.currentTimeMillis();
         l.clearPendingTicks();
         level = l;
@@ -782,7 +785,7 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
         }
         if (System.getProperty("mcj.test") != null) spawnTestMobs();
         // Minecraft::hostMultiplayer: открытый мир — сервер для сети
-        if (!l.isClientSide) Net.host(this, l, p);
+        if (!l.isClientSide && !Bench.on()) Net.host(this, l, p);
     }
 
     /** Отладка: mcj.world=<папка> — сразу войти в мир, mcj.screen=<имя> — открыть экран (проверка раскладок). */
@@ -790,6 +793,11 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
         String w = System.getProperty("mcj.world"), sc = System.getProperty("mcj.screen");
         // отладка: mcj.create=<папка>:<сид> — сразу сгенерировать мир выживания (замер генерации)
         String cr = System.getProperty("mcj.create");
+        // отладка: mcj.bench=<прогонов> — бенчмарк (Bench)
+        if (System.getProperty("mcj.bench") != null) {
+            Bench.start(this);
+            return;
+        }
         if (cr != null && cr.indexOf(':') > 0) {
             createWorld(cr.substring(0, cr.indexOf(':')), Long.parseLong(cr.substring(cr.indexOf(':') + 1)), 0);
             return;
@@ -1916,7 +1924,7 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
     private void tickFogBr() {
         Player p = player;
         float brr = LevelRenderer.BRF[level.getRawBrightness(Mth.floor(p.x), Mth.floor(p.y + Player.EYE), Mth.floor(p.z))];
-        float w = Options.lowQuality ? 0 : 1f / 3f;
+        float w = Options.low() ? 0 : 1f / 3f;
         fogBrO = fogBr;
         fogBr += (brr * (1 - w) + w - fogBr) * 0.1f;
     }
@@ -1942,7 +1950,7 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
         long q1 = System.currentTimeMillis();
         int liquid = p.isUnderLiquid(true) ? 1 : (p.isUnderLiquid(false) ? 2 : 0);
         if (sky == null) sky = new Sky();
-        sky.update(level, a, Options.lowQuality ? 3 : 2, fogBrO + (fogBr - fogBrO) * a, liquid);
+        sky.update(level, a, Options.low() ? 3 : 2, fogBrO + (fogBr - fogBrO) * a, liquid);
         int fogCol = sky.rgb();
         lr.fog.setColor(fogCol);
         background.setColor(0xFF000000 | fogCol);
@@ -2186,6 +2194,10 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
     }
 
     /** ProgressScreen 0.6.1: земля, «Generating world», стадия и полоска процентов. */
+    Graphics gfx() {
+        return getGraphics();
+    }
+
     void drawLoading(Graphics dev, String text, int pct) {
         Graphics g = frameG(dev);
         if (R.gui != null) {

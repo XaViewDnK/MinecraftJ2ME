@@ -16,6 +16,10 @@ public final class Sound implements Runnable {
     private static final Hashtable variants = new Hashtable(); // база -> Vector имён файлов
     private static final Hashtable players = new Hashtable();   // имя файла -> Player
     private static final Random rnd = new Random();
+
+    static void seed(long s) {
+        rnd.setSeed(s);
+    }
     private static boolean ok;
     public static boolean enabled = true;
 
