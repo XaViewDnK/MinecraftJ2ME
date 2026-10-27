@@ -4,11 +4,13 @@ public final class Log {
 
     public static void i(String s) {
         System.out.println("MCJ: " + s);
+        Link.send(s);
     }
 
     public static void e(String s, Throwable t) {
         last = s + ": " + t;
         System.out.println("MCJ ERROR: " + last);
+        Link.send("ERROR " + last);
         t.printStackTrace();
     }
 }

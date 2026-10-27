@@ -275,7 +275,7 @@ public final class Gui {
         Player p = mc.player;
         Inventory inv = p.inv;
         int gw = R.gw, gh = R.gh;
-        if (!inv.creative) {
+        if (!inv.creative && !Prof.x('1')) {
             renderHearts(g, p);
             renderBubbles(g, p);
         }
@@ -284,7 +284,7 @@ public final class Gui {
             if (amount > 1) amount = 1f - (float) (p.sleepTimer - Player.SLEEP_DURATION) / Player.WAKE_UP_DURATION;
             R.fill(g, 0, 0, gw, gh, ((int) (220f * amount) << 24) | 0x101020);
         }
-        renderToolBar(g, inv);
+        if (!Prof.x('2')) renderToolBar(g, inv);
         renderChat(g);
         if (itemNameTime < 1f) {
             int id = inv.selId();
@@ -320,7 +320,7 @@ public final class Gui {
             }
         }
         float x = xBase + 3;
-        for (int i = 0; i < numSlots - 1; i++) {
+        for (int i = 0; i < numSlots - 1 && !Prof.x('3'); i++) {
             R.item(g, inv.slotId(i), inv.slotAux(i), x, ySlot);
             x += 20;
         }
@@ -475,7 +475,7 @@ public final class Gui {
                 float dx = x + 0.5f - r, dy = y + 0.5f - r, q = dx * dx + dy * dy;
                 if (q <= r2 && q >= i2) p[y * d + x] = argb;
             }
-        Image im = Image.createRGBImage(p, d, d, true);
+        Image im = R.rgbImage(p, d, d);
         if (MemDbg.on) MemDbg.img(im, "Gui.circle");
         return im;
     }

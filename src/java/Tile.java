@@ -279,6 +279,9 @@ public final class Tile {
     public static final float[] resist = new float[N];
     public static final float[] friction = new float[N];
 
+    /** solidBlocking по id (материал и cube после инициализации не меняются) */
+    private static final boolean[] solidBlockingT = new boolean[N];
+
     static {
         int[][] m = {
                 { MT_DIRT, 2, 3, 60, 248, 249, 253, 255 },
@@ -324,7 +327,9 @@ public final class Tile {
         // FarmTile, StoneSlabTile: setLightBlock(255)
         lightBlock[FARMLAND] = 15;
         lightBlock[SLAB] = 15;
+        for (int i = 1; i < N; i++) solidBlockingT[i] = mSolidBlocking(mat[i]) && cube[i];
     }
+
 
     public static boolean mSolid(int m) {
         return !(m == MT_AIR || m == MT_FIRE || m == MT_WATER || m == MT_LAVA || m == MT_PLANT || m == MT_REPL_PLANT
@@ -365,7 +370,7 @@ public final class Tile {
 
     /** Level::isSolidBlockingTile для id */
     public static boolean solidBlocking(int id) {
-        return id > 0 && mSolidBlocking(mat[id]) && cube[id];
+        return solidBlockingT[id];
     }
 
     /** Tile::getExplosionResistance */

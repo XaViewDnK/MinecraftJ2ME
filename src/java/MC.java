@@ -422,6 +422,14 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
         devW = W = getWidth();
         devH = H = getHeight();
         gameThread = Thread.currentThread();
+        if (Link.on) {
+            // сборка Link: хост присылает свойства mcj.* до загрузки
+            drawLoading(g, "Waiting for link...", -1);
+            Link.awaitGo(4000);
+            debug = Link.prop("mcj.debug") != null;
+            Prof.on = debug;
+            Prof.exp = Link.prop("mcj.exp") == null ? "" : Link.prop("mcj.exp");
+        }
         try {
             drawLoading(g, "Loading...", -1);
             R.load();
@@ -444,17 +452,25 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
             } catch (Throwable t) {
                 mptListener = false;
             }
+            // Nokia UI API: подсветка не гаснет, пока игра на экране (на других телефонах класса нет)
+            try {
+                Class.forName("com.nokia.mid.ui.DeviceControl");
+                backlight = (Runnable) Class.forName("Backlight").newInstance();
+            } catch (Throwable t) {
+                backlight = null;
+            }
             g3d = Graphics3D.getInstance();
             Storage.init();
             initDone = true;
             setScreen(new StartMenuScreen());
             if (MemDbg.on) MemDbg.mark("menu");
+            if (Link.on) linkHello();
             debugScreen();
         } catch (Throwable t) {
             Log.e("init", t);
         }
         long last = System.currentTimeMillis();
-        long acc = 0;
+        acc = 0;
         fpsTime = last;
         while (running) {
             try {
@@ -463,29 +479,41 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
                 last = now;
                 if (acc > 500) acc = 500;
                 processEvents();
+                if (Link.on) linkCmds();
+                if (backlight != null && now - lightsAt >= 5000 && isShown()) {
+                    lightsAt = now;
+                    try {
+                        backlight.run();
+                    } catch (Throwable t) {
+                        backlight = null;
+                    }
+                }
                 Net.pump(this);
                 keyTurn();
-                int n = 0;
-                long t0 = System.currentTimeMillis();
-                while (acc >= 50 && n < 6) {
-                    long tt = System.currentTimeMillis();
-                    tick();
-                    if (Prof.on) Prof.tick(System.currentTimeMillis() - tt);
-                    if (Bench.run != null) Bench.run.tickTime(System.currentTimeMillis() - tt);
-                    acc -= 50;
-                    n++;
+                // в мире тики идут внутри renderWorld, пока GPU рисует отправленный кадр (до releaseTarget)
+                ticksDone = false;
+                tickInFrame = !Prof.x('W') && !paintMode && level != null && (screen == null || screen.showsWorld());
+                if (!tickInFrame) runTicks();
+                long t0 = System.currentTimeMillis(), t1 = t0;
+                long t2, t3;
+                if (paintMode) {
+                    // кадр рисуется в paint() на Graphics окна (без внеэкранного буфера GameCanvas)
+                    paintMs = 0;
+                    repaint();
+                    serviceRepaints();
+                    t3 = System.currentTimeMillis();
+                    t2 = t1 + paintMs;
+                } else {
+                    render(frameG(g));
+                    runTicks();
+                    t2 = System.currentTimeMillis();
+                    if (!Prof.x('f')) present(g);
+                    t3 = System.currentTimeMillis();
                 }
-                long t1 = System.currentTimeMillis();
-                partial = acc / 50f;
-                render(frameG(g));
-                long t2 = System.currentTimeMillis();
-                present(g);
-                long t3 = System.currentTimeMillis();
-                tTick = (tTick * 7 + (t1 - t0) * 8) / 8;
                 tFlush = (tFlush * 7 + (t3 - t2) * 8) / 8;
                 if (Bench.run != null && level != null) Bench.run.frame(t3);
                 if (Prof.on) {
-                    if (t3 - t0 >= 60) Log.i("SPIKE frame " + (t3 - t0) + ": ticks " + n + "x " + (t1 - t0) + " upd " + lastFrame[0] + " bind " + lastFrame[1]
+                    if (t3 - t0 >= 60 && Prof.x('s')) Log.i("SPIKE frame " + (t3 - t0) + ": ticks " + lastTicks + "x " + lastTickMs + " upd " + lastFrame[0] + " bind " + lastFrame[1]
                             + " world " + lastFrame[2] + " ent " + lastFrame[3] + " rel " + lastFrame[4] + " render " + (t2 - t1) + " flush " + (t3 - t2));
                     Prof.acc[Prof.F_FLUSH] += t3 - t2;
                     Prof.frame(t3 - t1);
@@ -510,6 +538,54 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
                 try { Thread.sleep(200); } catch (InterruptedException e) { }
             }
         }
+    }
+
+    /** Backlight (Nokia UI API) или null; раз в 5 с включает подсветку экрана */
+    private Runnable backlight;
+    private long lightsAt;
+
+    /** время для тиков (мс), тики этого кадра уже прошли, тики идут внутри кадра (renderWorld) */
+    private long acc;
+    private boolean ticksDone, tickInFrame;
+    private int lastTicks;
+    private long lastTickMs;
+
+    /** Тики накопленного времени (не больше 6 за кадр), затем доля до следующего тика для сглаживания. */
+    private void runTicks() {
+        if (ticksDone) return;
+        ticksDone = true;
+        int n = 0;
+        long t0 = System.currentTimeMillis();
+        while (acc >= 50 && n < 6) {
+            long tt = System.currentTimeMillis();
+            tick();
+            if (Prof.on) Prof.tick(System.currentTimeMillis() - tt);
+            if (Bench.run != null) Bench.run.tickTime(System.currentTimeMillis() - tt);
+            acc -= 50;
+            n++;
+        }
+        long t1 = System.currentTimeMillis();
+        partial = acc / 50f;
+        lastTicks = n;
+        lastTickMs = t1 - t0;
+        tTick = (tTick * 7 + (t1 - t0) * 8) / 8;
+    }
+
+    /** Отладка (Link «paint 1»): кадр — в paint(Graphics) окна вместо буфера GameCanvas и flushGraphics. */
+    volatile boolean paintMode;
+    private long paintMs;
+
+    public void paint(Graphics pg) {
+        if (!paintMode || !initDone) {
+            super.paint(pg);
+            return;
+        }
+        long a = System.currentTimeMillis();
+        if (rotated) {
+            render(rotG);
+            pg.drawRegion(rotBuf, 0, 0, W, H, Sprite.TRANS_ROT90, 0, 0, Graphics.TOP | Graphics.LEFT);
+        } else render(pg);
+        paintMs = System.currentTimeMillis() - a;
     }
 
     public void setScreen(Screen s) {
@@ -564,7 +640,7 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
         if (ticks % 6000 == 0 && !level.isClientSide) saveNow();
         if (Prof.on) {
             long p7 = Prof.t();
-            if (p7 - p0 >= 25) Log.i("SPIKE tick " + (p7 - p0) + ": pl " + (p1 - p0) + " lvl " + (p2 - p1) + " ent " + (p3 - p2) + " part " + (p4 - p3)
+            if (p7 - p0 >= 25 && Prof.x('s')) Log.i("SPIKE tick " + (p7 - p0) + ": pl " + (p1 - p0) + " lvl " + (p2 - p1) + " ent " + (p3 - p2) + " part " + (p4 - p3)
                     + " spawn " + (p5 - p4) + " oth " + (p6 - p5) + " save " + (p7 - p6) + " ents " + level.entities.size());
             Prof.acc[Prof.T_PLAYER] += p1 - p0;
             Prof.acc[Prof.T_ENT] += p3 - p2;
@@ -673,6 +749,104 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
                 }
             }
         }
+    }
+
+    // ---- сборка Link: команды хоста по Bluetooth (см. Link) ----
+
+    private void linkHello() {
+        Runtime r = Runtime.getRuntime();
+        StringBuffer sb = new StringBuffer("LINK hello ").append(System.getProperty("microedition.platform"))
+                .append(" canvas ").append(devW).append('x').append(devH).append(" heap ").append(r.totalMemory() >> 10)
+                .append("K free ").append(r.freeMemory() >> 10).append("K gfx ").append(Options.GRAPHICS_NAME[Options.graphics])
+                .append(" view ").append(Options.viewChunks).append(" m3g");
+        try {
+            java.util.Hashtable h = Graphics3D.getProperties();
+            for (java.util.Enumeration e = h.keys(); e.hasMoreElements();) {
+                Object k = e.nextElement();
+                sb.append(' ').append(k).append('=').append(h.get(k));
+            }
+        } catch (Throwable t) {
+            sb.append(" ?");
+        }
+        Log.i(sb.toString());
+    }
+
+    private void linkCmds() {
+        for (String c; (c = Link.poll()) != null;) {
+            try {
+                linkCmd(c);
+            } catch (Throwable t) {
+                Log.e("link " + c, t);
+            }
+        }
+    }
+
+    /**
+     * bench [N|calmN|cmpN], create папка сид [1], load папка, quit, exit, gfx 0..2, view 1..4, fps 0|1, prof 0|1,
+     * down/up код клавиши, tap код, status, mem, worlds.
+     */
+    private void linkCmd(String c) {
+        String[] a = split(c, ' ');
+        String k = a[0];
+        int v = -1;
+        try {
+            if (a.length > 1) v = Integer.parseInt(a[1]);
+        } catch (NumberFormatException e) {
+        }
+        if (k.equals("bench")) {
+            if (level != null) quitToTitle();
+            Link.put("mcj.bench", a.length > 1 ? a[1] : "1");
+            Bench.start(this);
+        } else if (k.equals("create")) {
+            if (level != null) quitToTitle();
+            createWorld(a[1], Long.parseLong(a[2]), a.length > 3 ? Integer.parseInt(a[3]) : 0);
+        } else if (k.equals("load")) {
+            if (level != null) quitToTitle();
+            loadWorld(c.substring(5).trim());
+        } else if (k.equals("quit")) {
+            if (level != null) quitToTitle();
+        } else if (k.equals("exit")) {
+            if (level != null) quitToTitle();
+            running = false;
+            midlet.notifyDestroyed();
+        } else if (k.equals("gfx")) {
+            Options.graphics = Mth.clamp(v, 0, 2);
+            applyOptions();
+        } else if (k.equals("view")) {
+            Options.viewChunks = Mth.clamp(v, Options.VIEW_MIN, Options.VIEW_MAX);
+            applyOptions();
+        } else if (k.equals("fps")) Options.showFps = v != 0;
+        else if (k.equals("prof")) Prof.on = v != 0;
+        else if (k.equals("exp")) Prof.exp = a.length > 1 && !a[1].equals("-") ? a[1] : "";
+        else if (k.equals("paint")) paintMode = v != 0;
+        else if (k.equals("hud3d")) {
+            Hud3D.want();
+            Hud3D.mode = v;
+        }
+        else if (k.equals("rebuild")) {
+            if (lr != null) lr.allDirty();
+        }
+        else if (k.equals("sound")) Options.sound = v != 0;
+        else if (k.equals("third")) Options.thirdPerson = v != 0;
+        else if (k.equals("down")) keyDown(v);
+        else if (k.equals("up")) keyUp(v);
+        else if (k.equals("tap")) {
+            keyDown(v);
+            keyUp(v);
+        } else if (k.equals("status")) {
+            Log.i("STATUS fps " + fps + " screen " + (screen == null ? "-" : screen.getClass().getName()) + " level "
+                    + (level == null ? "-" : level.name) + " gfx " + Options.graphics + " view " + Options.viewChunks
+                    + " 3d " + t3d / 8 + " hud " + tHud / 8 + " fl " + tFlush / 8 + " tk " + tTick / 8 + " upd " + tUpd / 8);
+        } else if (k.equals("mem")) {
+            Runtime r = Runtime.getRuntime();
+            r.gc();
+            Log.i("MEMINFO used " + ((r.totalMemory() - r.freeMemory()) >> 10) + "K total " + (r.totalMemory() >> 10) + "K");
+        } else if (k.equals("worlds")) {
+            java.util.Vector w = Storage.listWorlds();
+            StringBuffer sb = new StringBuffer("WORLDS");
+            for (int i = 0; w != null && i < w.size(); i++) sb.append(' ').append(((Storage.WorldInfo) w.elementAt(i)).folder);
+            Log.i(sb.toString());
+        } else Log.i("link: unknown " + c);
     }
 
     // ---- нехватка памяти: дальность прорисовки ниже на чанк вместо вылета ----
@@ -916,18 +1090,18 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
             p.loadSleeping = false;
             if (level.getTile(p.bedX, p.bedY, p.bedZ) == Tile.BED) startSleep(p.bedX, p.bedY, p.bedZ, true);
         }
-        if (System.getProperty("mcj.test") != null) spawnTestMobs();
+        if (Link.prop("mcj.test") != null) spawnTestMobs();
         // Minecraft::hostMultiplayer: открытый мир — сервер для сети
         if (!l.isClientSide && !Bench.on()) Net.host(this, l, p);
     }
 
     /** Отладка: mcj.world=<папка> — сразу войти в мир, mcj.screen=<имя> — открыть экран (проверка раскладок). */
     private void debugScreen() {
-        String w = System.getProperty("mcj.world"), sc = System.getProperty("mcj.screen");
+        String w = Link.prop("mcj.world"), sc = Link.prop("mcj.screen");
         // отладка: mcj.create=<папка>:<сид> — сразу сгенерировать мир выживания (замер генерации)
-        String cr = System.getProperty("mcj.create");
+        String cr = Link.prop("mcj.create");
         // отладка: mcj.bench=<прогонов> — бенчмарк (Bench)
-        if (System.getProperty("mcj.bench") != null) {
+        if (Link.prop("mcj.bench") != null) {
             Bench.start(this);
             return;
         }
@@ -940,7 +1114,7 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
         if (sc == null && w == null) return;
         if (w != null) loadWorld(w);
         // отладка: mcj.pos=x,y,z,yaw,pitch — поставить игрока (осмотр места с багом)
-        String ps = System.getProperty("mcj.pos");
+        String ps = Link.prop("mcj.pos");
         if (level != null && ps != null) {
             float[] v = new float[5];
             for (int i = 0, p = 0; i < 5 && p <= ps.length(); i++) {
@@ -953,12 +1127,12 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
             player.yRot = player.yRotO = v[3];
             player.xRot = player.xRotO = v[4];
         }
-        if (level != null && System.getProperty("mcj.time") != null) {
+        if (level != null && Link.prop("mcj.time") != null) {
             // отладка: время суток (тики от начала дня)
-            level.time = level.time - level.time % Level.TICKS_PER_DAY + Integer.parseInt(System.getProperty("mcj.time"));
+            level.time = level.time - level.time % Level.TICKS_PER_DAY + Integer.parseInt(Link.prop("mcj.time"));
             level.updateSkyDarken();
         }
-        if (level != null && System.getProperty("mcj.night") != null) {
+        if (level != null && Link.prop("mcj.night") != null) {
             level.time = level.time - level.time % Level.TICKS_PER_DAY + 14400;
             level.updateSkyDarken();
         }
@@ -1001,7 +1175,7 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
             m.setPos(x, level.getTopSolid(Mth.floor(x), Mth.floor(z)), z);
             m.yRot = player.yRot + 180f;
             m.bodyRot = m.bodyRotO = m.yRot;
-            boolean ai = "ai".equals(System.getProperty("mcj.test"));
+            boolean ai = "ai".equals(Link.prop("mcj.test"));
             if (m instanceof Monster) ((Monster) m).noAi = !ai;
             if (m instanceof Animal) ((Animal) m).noAi = !ai;
             level.addEntity(m);
@@ -1016,6 +1190,7 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
 
     public void applyOptions() {
         if (lr != null) lr.renderDist = Options.renderDistance();
+        LevelRenderer.setPerspective(!Options.low());
         Tile.fastLeaves = !Options.fancy();
     }
 
@@ -1187,7 +1362,7 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
     }
 
     int dragEvents;
-    boolean debug = System.getProperty("mcj.debug") != null;
+    boolean debug = Link.prop("mcj.debug") != null;
 
     private void gameDrag(int role, int x, int y) {
         dragEvents++;
@@ -2032,14 +2207,20 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
     // ---- отрисовка ----
 
     long tTick, tFlush, t3d, tHud; // *8, скользящее среднее
+    /** HUD уже нарисован до releaseTarget (отладка «exp 8») */
+    private boolean hudBound;
 
     private void render(Graphics g) {
         if (!initDone) return;
         if (level != null && (screen == null || screen.showsWorld())) {
             long a = System.currentTimeMillis();
+            hudBound = hud3d = false;
             renderWorld(g);
             long b = System.currentTimeMillis();
-            renderHud(g);
+            // тики внутри кадра могли закрыть мир (конец бенчмарка)
+            if (!hudBound && level != null) renderHud(g);
+            // кольцо касания — картинки по месту, в M3G не переносится
+            else if (hud3d && level != null) renderTouchRing(g);
             long c = System.currentTimeMillis();
             if (Prof.on) Prof.acc[Prof.F_HUD] += c - b;
             t3d = (t3d * 7 + (b - a) * 8) / 8;
@@ -2051,8 +2232,20 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
             screen.renderFocus(g);
             if (Prof.on) Prof.add(Prof.F_SCREEN, a);
         }
+        if (!hud3d) overlay(g);
+    }
+
+    /** HUD этого кадра нарисован квадами M3G (Hud3D) */
+    private boolean hud3d;
+
+    /** надписи поверх всего: состояние связи и счётчик кадров */
+    private void overlay(Graphics g) {
         // Custom: счётчик кадров в левом верхнем углу (сердца под ним, Gui.hudTop)
-        if (Options.showFps) R.shadow(g, fps + " fps", 2, 2, 0xFFFFFF);
+        // сборка Link: состояние связи по Bluetooth — внизу слева
+        if (Link.on && !Prof.x('5')) R.shadow(g, Link.state, 2, R.gh - 10, 0xFFFF80);
+        // в мире — и время кадра по частям (мс): 3D (с перестройкой мешей), интерфейс, вывод, тики — для замеров на телефонах
+        if (Options.showFps && !Prof.x('5')) R.shadow(g, level != null && screen == null ? fps + " fps  3d " + t3d / 8 + " hud " + tHud / 8 + " fl " + tFlush / 8
+                + " tk " + tTick / 8 + " upd " + tUpd / 8 : fps + " fps", 2, 2, 0xFFFFFF);
     }
 
     Sky sky;
@@ -2105,9 +2298,16 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
             lr.fog.setLinear(lr.renderDist * 0.6f, lr.renderDist);
         }
         try {
-            g3d.bindTarget(g, true, 0);
-            g3d.setViewport(0, 0, W, H);
+            long b0 = System.currentTimeMillis();
+            bindWorld(g);
+            long b1 = System.currentTimeMillis();
+            // отладка «exp v»: 3D в половину высоты — упирается ли кадр в закраску
+            g3d.setViewport(0, 0, W, Prof.x('v') ? H / 2 : H);
             g3d.clear(background);
+            if (Prof.on) {
+                Prof.bindMs += b1 - b0;
+                Prof.clearMs += System.currentTimeMillis() - b1;
+            }
             q2 = System.currentTimeMillis();
             float fov = liquid == 1 ? 60f : 70f;
             if (p.health <= 0) fov /= (1 - 500f / (p.deathTime + a + 500f)) * 2f + 1f;
@@ -2135,8 +2335,10 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
             viewBob.invert();
             camT.postMultiply(viewBob);
             // Options::fancyGraphics: плоскость неба и облака
-            if (Options.fancy()) sky.render(g3d, camT, fov, (float) W / H, lr.renderDist, ex, ey, ez,
+            long s0 = System.currentTimeMillis();
+            if (Options.fancy() && !Prof.x('k')) sky.render(g3d, camT, fov, (float) W / H, lr.renderDist, ex, ey, ez,
                     p.xo + (p.x - p.xo) * a, p.zo + (p.z - p.zo) * a, ticks + a, level.getSkyBrightness(a));
+            if (Prof.on) Prof.skyMs += System.currentTimeMillis() - s0;
             g3d.setCamera(camera, camT);
             g3d.resetLights();
             camX = ex; camY = ey; camZ = ez; camYaw = yaw; camPitch = pitch; camFov = fov; camThird = third;
@@ -2150,7 +2352,7 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
             q3 = System.currentTimeMillis();
             er.playerRotY = yaw;
             long r0 = Prof.t();
-            er.render(g3d, level, a, ex, ey, ez, frustum, lr.renderDist);
+            if (!Prof.x('e')) er.render(g3d, level, a, ex, ey, ez, frustum, lr.renderDist);
             if (third > 0 || p.sleeping) er.renderPlayer(g3d, p, a, level);
             for (int i = 0; i < takes.size(); i++) {
                 ItemEntity c = (ItemEntity) takes.elementAt(i);
@@ -2186,6 +2388,32 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
                 hand.renderScreenEffect(g3d, p, level);
             }
             if (Prof.on) Prof.add(Prof.F_HAND, r3);
+            // тики — пока GPU рисует кадр; кадр уже отправлен с прежним состоянием и долей partial
+            if (tickInFrame) {
+                long k0 = Prof.t();
+                runTicks();
+                if (Prof.on) Prof.tickInFrameMs += Prof.t() - k0;
+            }
+            // HUD квадами M3G до releaseTarget (Hud3D: на ускорителе 2D поверх 3D дорого)
+            if (level != null && screen == null && !Prof.x('8') && Hud3D.want()) {
+                long h0 = Prof.t();
+                Hud3D.begin(g3d, W, H);
+                try {
+                    renderHud(g);
+                    overlay(g);
+                } finally {
+                    Hud3D.end();
+                }
+                hudBound = hud3d = true;
+                if (Prof.on) Prof.add(Prof.F_HUD, h0);
+            }
+            // отладка «exp 8»: HUD на Graphics, пока к нему привязан M3G (поведение не определено спецификацией)
+            if (Prof.x('8')) {
+                long h0 = Prof.t();
+                renderHud(g);
+                hudBound = true;
+                if (Prof.on) Prof.add(Prof.F_HUD, h0);
+            }
         } catch (Throwable t) {
             Log.e("render3d", t);
             try {
@@ -2210,6 +2438,25 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
             Prof.acc[Prof.F_WORLD] += q3 - q2;
             Prof.acc[Prof.F_REL] += q5 - q4;
         }
+    }
+
+    /**
+     * Graphics3D.OVERWRITE (M3G 1.1): кадр всё равно очищается целиком — прежнее содержимое холста не нужно
+     * переносить в буфер 3D (с ускорителем это копия всего экрана в GL каждый кадр). M3G 1.0 подсказку не знает
+     * и бросает IllegalArgumentException — тогда без неё.
+     */
+    private int bindHints = 16;
+
+    private void bindWorld(Graphics g) {
+        if (bindHints != 0 && !Prof.x('o')) {
+            try {
+                g3d.bindTarget(g, true, bindHints);
+                return;
+            } catch (IllegalArgumentException e) {
+                bindHints = 0;
+            }
+        }
+        g3d.bindTarget(g, true, 0);
     }
 
     /** выделенный блок (mc->hitResult обновляется только при касании и отпускании, TouchInputHolder::allowPicking) */
@@ -2315,9 +2562,14 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
         }
     }
 
+    /** отладка «exp 7»: полупрозрачная плашка размером с хотбар */
+    private Image hudTest;
+    /** «exp 9»: та же плашка, но альфа только 0 и 255 (шахматка) */
+    private Image hudTest2;
+
     private void renderHud(Graphics g) {
         if (level.showNameTags || Options.nameTags) renderNames(g);
-        gui.render(g, partial);
+        if (!Prof.x('h')) gui.render(g, partial);
         // TouchInputHolder::updateFeedbackProgressAlpha: кольцо проявляется за 0.4 с, при копании — до 1, потом гаснет
         boolean wt = worldTouch();
         if (wt && !moved && !holding) {
@@ -2327,17 +2579,44 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
         else if (fbAlpha > 0) fbAlpha = Math.max(0, fbAlpha - 0.04f);
         int sel = player.inv.selId();
         // Gui::renderProgressIndicator: без сенсора — прицел в центре (icons.png 0,0 16x16)
-        if (!touchUI) R.blit(g, R.icons, R.gw / 2f - 8, R.gh / 2f - 8, 0, 0, 16, 16);
+        if (Prof.x('6')) {
+            g.setColor(0x404040);
+            g.fillRect(W / 2 - 225, H - 55, 450, 55);
+        }
+        if (Prof.x('7')) {
+            if (hudTest == null) {
+                int[] px = new int[450 * 55];
+                for (int i = 0; i < px.length; i++) px[i] = 0x80404040;
+                hudTest = Image.createRGBImage(px, 450, 55, true);
+            }
+            g.drawImage(hudTest, W / 2 - 225, H - 55, Graphics.TOP | Graphics.LEFT);
+        }
+        if (Prof.x('9')) {
+            if (hudTest2 == null) {
+                int[] px = new int[450 * 55];
+                for (int i = 0; i < px.length; i++) px[i] = ((i / 450 + i % 450) & 4) != 0 ? 0xFF404040 : 0;
+                hudTest2 = Image.createRGBImage(px, 450, 55, true);
+            }
+            g.drawImage(hudTest2, W / 2 - 225, H - 55, Graphics.TOP | Graphics.LEFT);
+        }
+        if (Prof.x('a')) { }
+        // прицел — прямоугольниками: картинка с альфой поверх 3D на E6 стоит ~2 мс вывода кадра
+        else if (!touchUI && Prof.x('x')) R.blit(g, R.icons, R.gw / 2f - 8, R.gh / 2f - 8, 0, 0, 16, 16);
+        else if (!touchUI) R.blitRuns(g, R.icons, R.gw / 2f - 8, R.gh / 2f - 8, 0, 0, 16, 16);
         else if (sel == 261) {
             // с луком кольца нет; при натяжении — прицел в центре (Gui: bowEquipped && itemInUse)
             if (player.isUsingItem()) R.blit(g, R.icons, R.gw / 2f - 8, R.gh / 2f - 8, 0, 0, 16, 16);
-        } else if (fbAlpha > 0) {
-            float pr = holding && hasTarget ? breakProgress : 0;
-            gui.renderFeedback(g, touchX, touchY, fbAlpha, hasTarget || pick(touchX, touchY), pr);
-        }
+        } else if (fbAlpha > 0 && !Hud3D.on) renderTouchRing(g);
         if (debug && !Prof.x('d')) R.shadow(g, fps + " fps", 2, 32, 0xFFFFFF);
         if (debug && !Prof.x('d')) R.shadow(g, "upd " + tUpd / 8 + " bind " + tBind / 8 + " world " + tWorld / 8 + " ent " + tEnt / 8 + " rel " + tRel / 8 + " secs " + lr.lastDrawn, 2, 52, 0xFFFF80);
         if (debug && !Prof.x('d')) R.shadow(g, (int) player.x + " " + (int) player.y + " " + (int) player.z + " yaw " + (int) player.yRot + " ent " + level.entities.size() + " 3d " + t3d / 8 + " hud " + tHud / 8 + " fl " + tFlush / 8 + " tk " + tTick / 8, 2, 42, 0xFFFF80);
+    }
+
+    /** кольцо-отклик касания (Gui.renderFeedback) */
+    private void renderTouchRing(Graphics g) {
+        if (!touchUI || player == null || player.inv.selId() == 261 || fbAlpha <= 0) return;
+        float pr = holding && hasTarget ? breakProgress : 0;
+        gui.renderFeedback(g, touchX, touchY, fbAlpha, hasTarget || pick(touchX, touchY), pr);
     }
 
     /** ProgressScreen 0.6.1: земля, «Generating world», стадия и полоска процентов. */

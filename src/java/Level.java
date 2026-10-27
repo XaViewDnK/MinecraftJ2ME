@@ -45,7 +45,7 @@ public final class Level implements Pal.Src {
     public final java.util.Vector rawEntities = new java.util.Vector();
     public final java.util.Hashtable tileEntities = new java.util.Hashtable();
     public Player player;
-    public final Random random = new Random();
+    public final Rand random = new Rand();
     private int randValue;
 
     public Level() {
@@ -692,7 +692,15 @@ public final class Level implements Pal.Src {
             Entity e = (Entity) entities.elementAt(i);
             if (!e.removed) {
                 // далёкие от игроков сущности замораживаем
-                if (player == null || e instanceof RemotePlayer || nearestPlayerDist2(e.x, e.y, e.z) < 96 * 96) e.tick();
+                if (player == null || e instanceof RemotePlayer || nearestPlayerDist2(e.x, e.y, e.z) < 96 * 96) {
+                    if (Prof.on) {
+                        long t0 = Prof.t();
+                        e.tick();
+                        int ty = e.typeId() & 127;
+                        Prof.typeMs[ty] += Prof.t() - t0;
+                        Prof.typeN[ty]++;
+                    } else e.tick();
+                }
                 // Mob::checkDespawn: дальних монстров оригинал убирает на первом же тике
                 else if (e instanceof Monster) e.remove();
             }
@@ -974,6 +982,9 @@ public final class Level implements Pal.Src {
     public String chunkFile;
     /** смещения чанков в chunkFile (байт; 0 — чанка в файле нет) */
     public final int[] chunkOff = new int[CHUNKS * CHUNKS];
+    /** chunks.dat в нашей раскладке (чанк i — сектор 1 + i * SECTORS_PER_CHUNK, полный размер): сохранение пишет
+     *  только изменённые чанки на их места, а не весь файл (22 МБ, на E6 — 21 с) */
+    public boolean chunksInPlace;
     /** чанк выгружен */
     public final boolean[] gone = new boolean[CHUNKS * CHUNKS];
     private final long[] loadedAt = new long[CHUNKS * CHUNKS];

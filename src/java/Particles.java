@@ -19,7 +19,7 @@ public final class Particles {
     final boolean[] ground = new boolean[MAX], noPhys = new boolean[MAX];
     int count;
     Level level;
-    final java.util.Random r = new java.util.Random();
+    final Rand r = new Rand();
     final MeshBuilder[] mb = { new MeshBuilder(), new MeshBuilder(), new MeshBuilder() };
     final Appearance[] app = new Appearance[3];
     final Transform tr = new Transform();

@@ -9,7 +9,7 @@ public abstract class Mob extends Entity {
     /** walkAnimPos, walkAnimSpeed */
     public float walkAnim, walkAnimO, walkSpeed, walkSpeedO;
     public float bodyRot, bodyRotO, headRot;
-    protected final Random rnd = new Random(Mth.nextSeed());
+    protected final Rand rnd = new Rand(pre ? preSeed : Mth.nextSeed());
     public float hurtDir;
     private int ambientChance;
     protected Entity lastHurtBy;
@@ -28,8 +28,36 @@ public abstract class Mob extends Entity {
     protected Mob(Level l) {
         super(l);
         health = maxHealth();
-        ambientChance = -l.random.nextInt(100);
-        yRot = (float) (Mth.random() * Mth.PI * 2);
+        if (pre) {
+            ambientChance = preAmb;
+            yRot = preYRot;
+            pre = false;
+        } else {
+            ambientChance = -l.random.nextInt(100);
+            yRot = (float) (Mth.random() * Mth.PI * 2);
+        }
+    }
+
+    /**
+     * MobSpawner: случайные числа конструктора вынуты заранее (preRoll) — моб создаётся, только если место
+     * прошло проверку освещения; последовательности генераторов и номера сущностей те же, что при создании сразу.
+     */
+    private static boolean pre;
+    private static long preSeed;
+    private static int preAmb, preId;
+    private static float preYRot;
+
+    static void preRoll(Random levelRandom) {
+        preId = Entity.nextId++;
+        preSeed = Mth.nextSeed();
+        preAmb = -levelRandom.nextInt(100);
+        preYRot = (float) (Mth.random() * Mth.PI * 2);
+    }
+
+    /** включить вынутые числа для следующего конструктора моба */
+    static void usePreRoll() {
+        Entity.nextId = preId;
+        pre = true;
     }
 
     public int maxHealth() {
@@ -54,7 +82,7 @@ public abstract class Mob extends Entity {
 
     /** Mob::tick: Entity::tick (baseTick), aiStep, анимация ходьбы, поворот тела. */
     public void tick() {
-        baseTick();
+        if (!Prof.x('B')) baseTick();
         aiStep();
         walkSpeedO = walkSpeed;
         walkAnimO = walkAnim;
@@ -211,10 +239,10 @@ public abstract class Mob extends Entity {
         float ws = walkingSpeed, fs = flyingSpeed, mod = walkingSpeedModifier();
         walkingSpeed *= mod;
         flyingSpeed *= mod;
-        travel(moveStrafe, moveForward);
+        if (!Prof.x('T')) travel(moveStrafe, moveForward);
         walkingSpeed = ws;
         flyingSpeed = fs;
-        pushEntities();
+        if (!Prof.x('P')) pushEntities();
     }
 
     /** Mob::aiStep: толкать соседей в рамке +0.2 по горизонтали. */

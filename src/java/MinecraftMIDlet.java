@@ -7,6 +7,8 @@ public class MinecraftMIDlet extends MIDlet {
 
     protected void startApp() {
         if (mc == null) {
+            // сборка Link (отладка по Bluetooth): атрибут MCJ-Link в манифесте
+            Link.start(getAppProperty("MCJ-Link"));
             if (MemDbg.on) {
                 MemDbg.boot();
                 MemDbg.mark("boot");

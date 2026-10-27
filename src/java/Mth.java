@@ -9,7 +9,7 @@ public final class Mth {
      */
     private static final float SIN_SCALE = 65536.0f / (2.0f * PI);
     private static final long[] SINC = new long[4096];
-    private static final java.util.Random RND = new java.util.Random();
+    private static final Rand RND = new Rand();
 
     /** 0..1, замена Math.random() (её нет в CLDC). */
     public static float random() {

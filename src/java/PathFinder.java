@@ -1,18 +1,24 @@
-import java.util.Hashtable;
-
 /** Поиск пути A* — PathFinder / Node / BinaryHeap / Path 0.6.1 (без открывания дверей, вода не избегается). */
 public final class PathFinder {
 
     public static final class Node {
-        final int x, y, z, hash;
+        int x, y, z, hash;
         int heapIdx = -1;
         float g, h, f;
         Node cameFrom;
         boolean closed;
+        /** distanceTo(цель поиска), посчитанное один раз (td < 0 — ещё нет) */
+        float td;
 
-        Node(int x, int y, int z) {
+        /** узел из пула на новую клетку */
+        void reset(int x, int y, int z, int hash) {
             this.x = x; this.y = y; this.z = z;
-            hash = createHash(x, y, z);
+            this.hash = hash;
+            heapIdx = -1;
+            g = h = f = 0;
+            cameFrom = null;
+            closed = false;
+            td = -1;
         }
 
         static int createHash(int x, int y, int z) {
@@ -63,7 +69,19 @@ public final class PathFinder {
     private static final int MAX_NODES = 2048;
 
     private final Level level;
-    private final Hashtable nodes = new Hashtable();
+    /**
+     * Узлы поиска: открытая адресация по Node.createHash (совпадение хеша — тот же узел, как в оригинале);
+     * запись живая, пока её метка равна stamp текущего поиска. Узлы берутся из пула и переживают поиски.
+     */
+    private int stamp;
+    private int[] nKey = new int[4096], nStamp = new int[4096];
+    private Node[] nVal = new Node[4096];
+    private Node[] pool = new Node[512];
+    /** isFree клеток объёма моба за поиск (мир во время поиска не меняется) */
+    private int[] fKey = new int[8192], fStamp = new int[8192];
+    private byte[] fVal = new byte[8192];
+    private int fCount;
+    private Node target;
     private Node[] heap = new Node[1024];
     private int heapSize;
     private final Node[] neighbors = new Node[4];
@@ -86,9 +104,21 @@ public final class PathFinder {
 
     private void findPath(Path path, Mob e, float xt, float yt, float zt, float maxDist) {
         Prof.paths++;
-        nodes.clear();
+        long pt0 = Prof.on ? Prof.t() : 0;
+        findPath0(path, e, xt, yt, zt, maxDist);
+        if (Prof.on) Prof.pathMs += Prof.t() - pt0;
+    }
+
+    private void findPath0(Path path, Mob e, float xt, float yt, float zt, float maxDist) {
+        if (++stamp == 0) {
+            for (int i = 0; i < nStamp.length; i++) nStamp[i] = 0;
+            for (int i = 0; i < fStamp.length; i++) fStamp[i] = 0;
+            stamp = 1;
+        }
         heapSize = 0;
         created = 0;
+        fCount = 0;
+        target = null;
         int startY;
         float hw = e.bbW / 2;
         if (e.inWater) {
@@ -120,12 +150,17 @@ public final class PathFinder {
         }
         sizeX = sizeZ = Mth.floor(e.bbW + 1);
         sizeY = Mth.floor(e.bbH + 1);
+        // isFree кешируется уже с размером моба; узлы до этого места (from, to) его не вызывали
+        target = to;
         search(path, from, to, maxDist);
+        for (int i = 0; i < heapSize; i++) heap[i] = null;
+        // большой поиск не держит узлы в хипе: в пуле остаются первые 512
+        for (int i = 512; i < created; i++) pool[i] = null;
     }
 
     private void search(Path path, Node from, Node to, float maxDist) {
         from.g = 0;
-        from.h = from.distanceTo(to);
+        from.h = dist(from);
         from.f = from.h;
         heapSize = 0;
         insert(from);
@@ -136,7 +171,7 @@ public final class PathFinder {
                 reconstruct(path, to);
                 return;
             }
-            if (x.distanceTo(to) < closest.distanceTo(to)) closest = x;
+            if (dist(x) < dist(closest)) closest = x;
             x.closed = true;
             int n = neighbors(x, to, maxDist);
             for (int i = 0; i < n; i++) {
@@ -146,7 +181,7 @@ public final class PathFinder {
                 if (y.heapIdx < 0 || tg < y.g) {
                     y.cameFrom = x;
                     y.g = tg;
-                    y.h = y.distanceTo(to);
+                    y.h = dist(y);
                     if (y.heapIdx >= 0) changeCost(y, y.g + y.h);
                     else {
                         y.f = y.g + y.h;
@@ -166,10 +201,10 @@ public final class PathFinder {
         Node w = node(pos.x - 1, pos.y, pos.z, jump);
         Node e = node(pos.x + 1, pos.y, pos.z, jump);
         Node s = node(pos.x, pos.y, pos.z - 1, jump);
-        if (n != null && !n.closed && n.distanceTo(target) < maxDist) neighbors[p++] = n;
-        if (w != null && !w.closed && w.distanceTo(target) < maxDist) neighbors[p++] = w;
-        if (e != null && !e.closed && e.distanceTo(target) < maxDist) neighbors[p++] = e;
-        if (s != null && !s.closed && s.distanceTo(target) < maxDist) neighbors[p++] = s;
+        if (n != null && !n.closed && dist(n) < maxDist) neighbors[p++] = n;
+        if (w != null && !w.closed && dist(w) < maxDist) neighbors[p++] = w;
+        if (e != null && !e.closed && dist(e) < maxDist) neighbors[p++] = e;
+        if (s != null && !s.closed && dist(s) < maxDist) neighbors[p++] = s;
         return p;
     }
 
@@ -195,19 +230,79 @@ public final class PathFinder {
         return best;
     }
 
+    /** Node::distanceTo(цель) — то же число, посчитанное раз на узел */
+    private float dist(Node n) {
+        if (n.td < 0) n.td = n.distanceTo(target);
+        return n.td;
+    }
+
+    private static int mix(int h) {
+        h *= 0x9E3779B1;
+        return h ^ (h >>> 15);
+    }
+
     private Node node(int x, int y, int z) {
-        Integer key = new Integer(Node.createHash(x, y, z));
-        Node n = (Node) nodes.get(key);
-        if (n == null) {
-            n = new Node(x, y, z);
-            created++;
-            nodes.put(key, n);
+        int key = Node.createHash(x, y, z);
+        int m = nKey.length - 1, i = mix(key) & m;
+        while (nStamp[i] == stamp) {
+            if (nKey[i] == key) return nVal[i];
+            i = (i + 1) & m;
         }
+        if ((created + 1) * 2 > nKey.length) {
+            growNodes();
+            return node(x, y, z);
+        }
+        if (created == pool.length) {
+            Node[] np = new Node[pool.length * 2];
+            System.arraycopy(pool, 0, np, 0, created);
+            pool = np;
+        }
+        Node n = pool[created];
+        if (n == null) pool[created] = n = new Node();
+        n.reset(x, y, z, key);
+        created++;
+        nKey[i] = key;
+        nStamp[i] = stamp;
+        nVal[i] = n;
         return n;
     }
 
-    /** PathFinder::isFree для объёма моба */
+    private void growNodes() {
+        int[] ok = nKey, os = nStamp;
+        Node[] ov = nVal;
+        int len = ok.length * 2, m = len - 1;
+        nKey = new int[len];
+        nStamp = new int[len];
+        nVal = new Node[len];
+        for (int j = 0; j < ok.length; j++) {
+            if (os[j] != stamp) continue;
+            int i = mix(ok[j]) & m;
+            while (nStamp[i] == stamp) i = (i + 1) & m;
+            nKey[i] = ok[j];
+            nStamp[i] = stamp;
+            nVal[i] = ov[j];
+        }
+    }
+
+    /** PathFinder::isFree для объёма моба (с кешем на поиск) */
     private int isFree(int x, int y, int z) {
+        if (target == null || x < -256 || x >= 768 || z < -256 || z >= 768 || y < -64 || y >= 192) return isFree0(x, y, z);
+        int key = (x + 256) | ((z + 256) << 10) | ((y + 64) << 20);
+        int m = fKey.length - 1, i = mix(key) & m;
+        while (fStamp[i] == stamp) {
+            if (fKey[i] == key) return fVal[i];
+            i = (i + 1) & m;
+        }
+        int r = isFree0(x, y, z);
+        if ((fCount + 1) * 2 > fKey.length) return r;
+        fKey[i] = key;
+        fStamp[i] = stamp;
+        fVal[i] = (byte) r;
+        fCount++;
+        return r;
+    }
+
+    private int isFree0(int x, int y, int z) {
         for (int xx = x; xx < x + sizeX; xx++)
             for (int yy = y; yy < y + sizeY; yy++)
                 for (int zz = z; zz < z + sizeZ; zz++) {

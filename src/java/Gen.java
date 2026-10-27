@@ -466,6 +466,8 @@ public final class Gen {
             if (old == id && l.data.get(c, i) == data) return false;
         } else if (old == id) return false;
         l.blocks.set(c, i, id);
+        // LevelChunk::setTileAndData: onRemove старого тайла — между записью блока и data
+        if (old == Tile.LEAVES) leafRemoved(x, y, z);
         l.data.set(c, i, withData ? data : 0);
         int col = x | (z << 8);
         if (LIGHT_BLOCK[id] != 0) {
@@ -473,6 +475,19 @@ public final class Gen {
         } else if (y == hm[col] - 1) recalcHeight(x, y, z);
         if (id != 0) onPlace(x, y, z, id);
         return true;
+    }
+
+    /** LeafTile::onRemove: листве вокруг (куб 3x3x3) ставится UPDATE_LEAF_BIT, если hasChunksAt(±2). */
+    private void leafRemoved(int x, int y, int z) {
+        if (x < 2 || z < 2 || x > 253 || z > 253 || y + 2 < 0 || y - 2 >= 128) return;
+        for (int xo = -1; xo <= 1; xo++)
+            for (int yo = -1; yo <= 1; yo++)
+                for (int zo = -1; zo <= 1; zo++) {
+                    int xx = x + xo, yy = y + yo, zz = z + zo;
+                    if (getTile(xx, yy, zz) != Tile.LEAVES) continue;
+                    int c = (xx >> 4) | ((zz >> 4) << 4), i = ((xx & 15) << 11) | ((zz & 15) << 7) | yy;
+                    l.data.set(c, i, l.data.get(c, i) | 4);
+                }
     }
 
     /** Level::setTile/setTileAndData — с обновлением соседей. */
@@ -776,7 +791,7 @@ public final class Gen {
         int br = 15;
         for (int yy = h - 1; yy >= y && br > 0; yy--) br -= LIGHT_BLOCK[getTile(x, yy, z)];
         if (br < 0) br = 0;
-        for (int d = 1; d <= 3 && 15 - d > br; d++)
+        for (int d = 1; d <= 14 && 15 - d > br; d++)
             for (int dx = -d; dx <= d; dx++) {
                 int dz = d - Math.abs(dx);
                 if (canSeeSky(x + dx, y, z + dz) || canSeeSky(x + dx, y, z - dz)) return 15 - d;
@@ -830,15 +845,38 @@ public final class Gen {
                 if (pr != null && (done & 7) == 0) pr.progress("Generating level", done * 90 / 256);
             }
         }
-        // отложенные тики гравия руд (в оригинале — в первые тики игры)
+        // отладка: суммы блоков в том виде, в каком оригинал 0.6.1 пишет chunks.dat сразу после генерации
+        if (Link.prop("mcj.wsum") != null) {
+            WorldSum.math();
+            WorldSum.log(l);
+        }
+        // отложенные тики — в оригинале это первые тики игры, в сохранении сразу после генерации их ещё нет. Гравий руд (задержка 3) раньше жидкостей (5/30):
+        // HeavyTile::tick всех проверяет по ещё целому миру и создаёт FallingTile, а сущность убирает блок потом и без
+        // обновления соседей — падает только нижний блок висящего столбца, верхние остаются (сверено с chunks.dat 0.6.1).
         step++;
         int n = heavyN;
+        int mask = (1 << HEAVY_SHIFT) - 1;
+        for (int i = 0; i < n; i++) {
+            int v = heavy[i >> HEAVY_SHIFT][i & mask];
+            int x = v << 2 >> 22, y = v << 12 >> 22, z = v << 22 >> 22, t = getTile(x, y, z);
+            if ((t == 12 || t == 13) && y >= 0 && heavyFree(x, y - 1, z)) heavy[i >> HEAVY_SHIFT][i & mask] = v | 0x40000000;
+        }
         instaTick = true;
         for (int i = 0; i < n; i++) {
-            int v = heavy[i >> HEAVY_SHIFT][i & ((1 << HEAVY_SHIFT) - 1)];
+            int v = heavy[i >> HEAVY_SHIFT][i & mask];
+            if ((v & 0x40000000) == 0) continue;
+            v &= ~0x40000000;
+            heavy[i >> HEAVY_SHIFT][i & mask] = v;
             int x = v << 2 >> 22, y = v << 12 >> 22, z = v << 22 >> 22, t = getTile(x, y, z);
-            if (t == 12 || t == 13) checkSlide(x, y, z, t);
-            else if (t == 8 || t == 10) liquidTick(x, y, z, t, levelRandom);
+            if (t != 12 && t != 13) continue;
+            setNoUpdate(x, y, z, 0, 0, false);
+            while (heavyFree(x, y - 1, z) && y > 0) y--;
+            if (y > 0) set(x, y, z, t, 0, false);
+        }
+        for (int i = 0; i < n; i++) {
+            int v = heavy[i >> HEAVY_SHIFT][i & mask];
+            int x = v << 2 >> 22, y = v << 12 >> 22, z = v << 22 >> 22, t = getTile(x, y, z);
+            if (t == 8 || t == 10) liquidTick(x, y, z, t, levelRandom);
         }
         instaTick = false;
         heavy = null;

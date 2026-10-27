@@ -196,6 +196,77 @@ public final class R {
         }
     }
 
+    /**
+     * Картинка из ARGB: без прозрачных пикселей — без альфа-канала. На Nokia E6 любая картинка с альфой поверх
+     * 3D обходится дорого (вывод кадра +2..5 мс), непрозрачная — почти даром.
+     */
+    static Image rgbImage(int[] px, int w, int h) {
+        int n = w * h;
+        for (int i = 0; i < n; i++) if ((px[i] >>> 24) != 255) return Image.createRGBImage(px, w, h, true);
+        return Image.createRGBImage(px, w, h, false);
+    }
+
+    private static final Hashtable runCache = new Hashtable();
+
+    /**
+     * Кусок текстуры 1:1 непрозрачными прямоугольниками (fillRect по отрезкам строк одного цвета) — для маленьких
+     * одноцветных значков вроде прицела; пиксели те же, что у blit (прозрачные пропускаются).
+     */
+    public static void blitRuns(Graphics g, Tex t, float x, float y, int u, int v, int w, int h) {
+        int su = b(u), sv = b(v), sw = b(u + w) - su, sh = b(v + h) - sv;
+        if (sw <= 0 || sh <= 0) return;
+        if (Hud3D.on) {
+            // те же пиксели: альфа >= 128 — непрозрачно, остальное — дырка
+            Hud3D.quad(t, px(x), px(y), sw, sh, u, v, w, h, 0xFFFFFFFF, Hud3D.TEST);
+            return;
+        }
+        Long key = new Long(((long) t.id << 52) | ((long) u << 43) | ((long) v << 34) | ((long) w << 25) | ((long) h << 16));
+        int[] runs = (int[]) runCache.get(key);
+        if (runs == null) {
+            int[] mx = scaleMap(t.w, k), my = scaleMap(t.h, k);
+            int[] src = t.region(u, v, w, h);
+            int[] tmp = new int[sw * sh * 4];
+            int n = 0;
+            for (int yy = 0; yy < sh; yy++) {
+                int ty = Math.min(h - 1, Math.max(0, my[Math.min(my.length - 1, sv + yy)] - v));
+                for (int xx = 0; xx < sw;) {
+                    int tx = Math.min(w - 1, Math.max(0, mx[Math.min(mx.length - 1, su + xx)] - u));
+                    int c = src[ty * w + tx];
+                    int x1 = xx + 1;
+                    while (x1 < sw && src[ty * w + Math.min(w - 1, Math.max(0, mx[Math.min(mx.length - 1, su + x1)] - u))] == c) x1++;
+                    if ((c >>> 24) >= 128) {
+                        tmp[n++] = xx; tmp[n++] = yy; tmp[n++] = x1 - xx; tmp[n++] = c & 0xFFFFFF;
+                    }
+                    xx = x1;
+                }
+            }
+            // отрезки одной ширины и цвета в соседних строках — один прямоугольник (x, y, w, h, цвет)
+            int[] r = new int[n / 4 * 5];
+            int m = 0;
+            boolean[] used = new boolean[n / 4];
+            for (int i = 0; i < n / 4; i++) {
+                if (used[i]) continue;
+                int rx = tmp[i * 4], ry = tmp[i * 4 + 1], rw = tmp[i * 4 + 2], rc = tmp[i * 4 + 3], rh = 1;
+                for (int j = i + 1; j < n / 4; j++) {
+                    if (used[j] || tmp[j * 4 + 1] > ry + rh) continue;
+                    if (tmp[j * 4 + 1] == ry + rh && tmp[j * 4] == rx && tmp[j * 4 + 2] == rw && tmp[j * 4 + 3] == rc) {
+                        used[j] = true;
+                        rh++;
+                    }
+                }
+                r[m++] = rx; r[m++] = ry; r[m++] = rw; r[m++] = rh; r[m++] = rc;
+            }
+            runs = new int[m];
+            System.arraycopy(r, 0, runs, 0, m);
+            runCache.put(key, runs);
+        }
+        int X = px(x), Y = px(y);
+        for (int i = 0; i < runs.length; i += 5) {
+            g.setColor(runs[i + 4]);
+            g.fillRect(X + runs[i], Y + runs[i + 1], runs[i + 2], runs[i + 3]);
+        }
+    }
+
     /** Ближайший сосед: тексел t занимает пиксели [round(t*k), round((t+1)*k)). */
     static Image scaleImage(int[] in, int w, int h, float kk) {
         int W = Math.max(1, (int) (w * kk + 0.5f)), H = Math.max(1, (int) (h * kk + 0.5f));
@@ -205,7 +276,7 @@ public final class R {
             int sy = my[y] * w, oy = y * W;
             for (int x = 0; x < W; x++) out[oy + x] = in[sy + mx[x]];
         }
-        return Image.createRGBImage(out, W, H, true);
+        return rgbImage(out, W, H);
     }
 
     private static int[] map(int n, int N, float kk) {
@@ -250,6 +321,10 @@ public final class R {
         if (w <= 0 || h <= 0) return;
         int su = b(u), sv = b(v), sw = b(u + w) - su, sh = b(v + h) - sv;
         if (sw <= 0 || sh <= 0) return;
+        if (Hud3D.on) {
+            Hud3D.quad(t, px(x), px(y), sw, sh, u, v, w, h, 0xFFFFFFFF, t == guiAT ? Hud3D.TEST : Hud3D.BLEND);
+            return;
+        }
         Long key = new Long(((long) t.id << 52) | ((long) u << 43) | ((long) v << 34) | ((long) w << 25) | ((long) h << 16));
         Image im = (Image) blitCache.get(key);
         if (im == null) {
@@ -263,7 +338,7 @@ public final class R {
                     out[yy * sw + xx] = src[ty * w + tx];
                 }
             }
-            im = Image.createRGBImage(out, sw, sh, true);
+            im = rgbImage(out, sw, sh);
             if (MemDbg.on) MemDbg.img(im, "R.blit#" + t.id);
             if (blitCache.size() > 300) blitCache.clear();
             blitCache.put(key, im);
@@ -289,6 +364,10 @@ public final class R {
     /** Растянутый кусок в пикселях экрана; alpha — прозрачность, mul — множитель цвета (255 — без изменений). */
     public static void stretchedPx(Graphics g, Tex t, int X, int Y, int W, int H, int u, int v, int uw, int vh, int alpha, int mul) {
         if (W <= 0 || H <= 0 || uw <= 0 || vh <= 0) return;
+        if (Hud3D.on) {
+            Hud3D.quad(t, X, Y, W, H, u, v, uw, vh, (alpha << 24) | (mul * 0x10101), t == guiAT ? Hud3D.TEST : Hud3D.BLEND);
+            return;
+        }
         Long key = new Long(((long) t.id << 58) | ((long) u << 49) | ((long) v << 40) | ((long) uw << 31) | ((long) vh << 22)
                 | ((long) W << 11) | H);
         Hashtable cache = stretchCache;
@@ -313,7 +392,7 @@ public final class R {
                     out[yy * W + xx] = c;
                 }
             }
-            im = Image.createRGBImage(out, W, H, true);
+            im = rgbImage(out, W, H);
             if (MemDbg.on) MemDbg.img(im, "R.stretch");
             if (cache.size() > 600) cache.clear();
             cache.put(key, im);
@@ -351,6 +430,10 @@ public final class R {
     public static void fillPx(Graphics g, int x, int y, int w, int h, int argb) {
         int a = argb >>> 24;
         if (a == 0 || w <= 0 || h <= 0) return;
+        if (Hud3D.on) {
+            Hud3D.fill(x, y, w, h, argb);
+            return;
+        }
         if (a == 255) {
             g.setColor(argb & 0xFFFFFF);
             g.fillRect(x, y, w, h);
@@ -482,7 +565,7 @@ public final class R {
                     p[yy * sw + xx] = 0xFF000000 | ((((cc >> 16) & 255) * r / 255) << 16) | ((((cc >> 8) & 255) * gg / 255) << 8) | ((cc & 255) * bb / 255);
                 }
             }
-            im = Image.createRGBImage(p, sw, sh, true);
+            im = rgbImage(p, sw, sh);
             if (MemDbg.on) MemDbg.img(im, "R.glyph");
             if (glyphCache.size() > 600) glyphCache.clear();
             glyphCache.put(key, im);
@@ -519,7 +602,8 @@ public final class R {
                 int u = (c & 15) * 8, v = (c >> 4) * 8;
                 int su = (int) (u * kk + 0.5f), sv = (int) (v * kk + 0.5f);
                 int sw = (int) ((u + w) * kk + 0.5f) - su, sh = (int) ((v + 8) * kk + 0.5f) - sv;
-                if (sw > 0 && sh > 0) {
+                if (sw > 0 && sh > 0 && Hud3D.on) Hud3D.glyph(px(x + adv * fs), Y, sw, sh, u, v, w, color);
+                else if (sw > 0 && sh > 0) {
                     Image gi = glyph(c, color, fs, su, sv, sw, sh, m);
                     if (MemDbg.on) MemDbg.drawn(gi);
                     g.drawImage(gi, px(x + adv * fs), Y, Graphics.TOP | Graphics.LEFT);
@@ -592,6 +676,14 @@ public final class R {
     public static void item(Graphics g, int id, int aux, float x, float y, int mode) {
         if (id <= 0) return;
         Integer key = new Integer(id | ((aux & 0xFFF) << 16) | (mode << 28));
+        if (Hud3D.on) {
+            int N = b(16), c = mode == DARK ? 0xFF404040 : (mode == FADED ? 0x60FFFFFF : (mode == GHOST ? 0x33FFFFFF : 0xFFFFFFFF));
+            if (id >= 256) {
+                int ic = Item.iconFor(id, aux);
+                Hud3D.itemIcon((ic & 15) * 16, (ic >> 4) * 16, N, px(x), px(y), c);
+            } else Hud3D.blockIcon(id, aux, N, px(x), px(y), c);
+            return;
+        }
         Image im = (Image) iconCache.get(key);
         if (im == null) {
             int N = b(16);
@@ -613,7 +705,7 @@ public final class R {
                 else if (mode == GHOST) c = ((a * 0x33 / 255) << 24) | (c & 0xFFFFFF);
                 p[i] = c;
             }
-            im = Image.createRGBImage(p, N, N, true);
+            im = rgbImage(p, N, N);
             if (MemDbg.on) MemDbg.img(im, "R.icon");
             if (iconCache.size() > 200) iconCache.clear();
             iconCache.put(key, im);
@@ -694,6 +786,14 @@ public final class R {
                     0.5f - v, 0.5f, 0, 0.5f + v, 1 - v, 1 };
         }
         return new float[] { 0, 0, 0, 1, 1, 1 };
+    }
+
+    static int[] blockIconPx(int id, int aux, int N) {
+        return blockIcon(id, aux, N);
+    }
+
+    static Pix fontPix() {
+        return font;
     }
 
     private static int[] blockIcon(int id, int aux, int N) {

@@ -247,6 +247,21 @@ public final class Storage {
 
     private static void saveChunks0(Level l) throws IOException {
         String dir = base + l.folder + "/";
+        if (l.chunksInPlace && dir.concat("chunks.dat").equals(l.chunkFile)) {
+            try {
+                if (offsetWriteOk(dir)) {
+                    saveChunksInPlace(l, dir + "chunks.dat");
+                    return;
+                }
+            } catch (IOException e) {
+                // нет записи по смещению или файл не тот — весь файл заново
+                Log.e("chunks in place", e);
+                l.chunksInPlace = false;
+            } catch (RuntimeException e) {
+                Log.e("chunks in place", e);
+                l.chunksInPlace = false;
+            }
+        }
         // выгруженные чанки есть только в старом файле: новый пишется рядом (chunks.tmp) и подменяет старый
         boolean copy = l.goneCount > 0 && l.chunkFile != null;
         ChunkIn old = copy ? new ChunkIn(l.chunkFile) : null;
@@ -263,7 +278,8 @@ public final class Storage {
             header[hi + 3] = (byte) (off >> 24);
             order[i] = i;
         }
-        FileConnection fc = (FileConnection) Connector.open(dir + (copy ? "chunks.tmp" : "chunks.dat"), Connector.READ_WRITE);
+        // всегда рядом и подменой: прерванная запись (выход, установка новой версии посреди сохранения) не обрежет мир
+        FileConnection fc = (FileConnection) Connector.open(dir + "chunks.tmp", Connector.READ_WRITE);
         try {
             if (!fc.exists()) fc.create();
             else fc.truncate(0);
@@ -303,8 +319,8 @@ public final class Storage {
             } finally {
                 out.close();
             }
-            if (copy) {
-                old.close();
+            {
+                if (old != null) old.close();
                 FileConnection f = (FileConnection) Connector.open(dir + "chunks.dat", Connector.READ_WRITE);
                 try {
                     if (f.exists()) f.delete();
@@ -320,6 +336,96 @@ public final class Storage {
         // теперь выгруженные чанки подгружаются из нового файла (раскладка: чанк i — сектор 1 + i * SECTORS_PER_CHUNK)
         l.chunkFile = dir + "chunks.dat";
         for (int i = 0; i < 256; i++) l.chunkOff[i] = (1 + i * SECTORS_PER_CHUNK) * 4096;
+        l.chunksInPlace = true;
+    }
+
+    static final long CHUNKS_FILE_BYTES = 4096L + 256L * SECTORS_PER_CHUNK * 4096L;
+
+    /** chunks.dat разложен так, как пишет saveChunks0 (тогда изменённые чанки можно писать на их места) */
+    static boolean ourLayout(Level l, long size) {
+        if (size != CHUNKS_FILE_BYTES) return false;
+        for (int i = 0; i < 256; i++) if (l.chunkOff[i] != (1 + i * SECTORS_PER_CHUNK) * 4096) return false;
+        return true;
+    }
+
+    /** 1 — запись по смещению не обрезает файл, -1 — обрезает или не работает (проверка один раз на пробном файле) */
+    private static int offsetWrite;
+
+    private static boolean offsetWriteOk(String dir) {
+        if (offsetWrite != 0) return offsetWrite > 0;
+        offsetWrite = -1;
+        try {
+            FileConnection fc = (FileConnection) Connector.open(dir + "probe.tmp", Connector.READ_WRITE);
+            try {
+                if (!fc.exists()) fc.create();
+                else fc.truncate(0);
+                OutputStream out = fc.openOutputStream();
+                out.write(new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 });
+                out.close();
+                out = fc.openOutputStream(2);
+                out.write(9);
+                out.close();
+                out = fc.openOutputStream(5);
+                out.write(9);
+                out.close();
+                byte[] b = new byte[16];
+                InputStream in = fc.openInputStream();
+                int n = 0;
+                try {
+                    for (int r; n < 16 && (r = in.read(b, n, 16 - n)) > 0;) n += r;
+                } finally {
+                    in.close();
+                }
+                if (n == 8 && b[1] == 2 && b[2] == 9 && b[3] == 4 && b[5] == 9 && b[7] == 8) offsetWrite = 1;
+                fc.delete();
+            } finally {
+                fc.close();
+            }
+        } catch (Throwable t) {
+            oom(t);
+            Log.e("offset write", t);
+        }
+        Log.i("offset write " + (offsetWrite > 0 ? "ok" : "no"));
+        return offsetWrite > 0;
+    }
+
+    /**
+     * Только изменённые чанки — поверх их секторов (FileConnection.openOutputStream(offset) не обрезает файл).
+     * Выгруженные не менялись — их байты в файле уже верные. Заголовок, паддинг и прочие чанки те же.
+     */
+    private static void saveChunksInPlace(Level l, String url) throws IOException {
+        FileConnection fc = (FileConnection) Connector.open(url, Connector.READ_WRITE);
+        try {
+            if (!fc.exists() || fc.fileSize() != CHUNKS_FILE_BYTES) throw new IOException("chunks.dat size");
+            byte[] raw = null, len = le(CHUNK_BYTES + 4);
+            int n = 0;
+            for (int i = 0; i < 256; i++) {
+                if (!l.unsaved[i] || l.gone[i]) continue;
+                if (raw == null) raw = new byte[32768];
+                OutputStream out = fc.openOutputStream((long) (1 + i * SECTORS_PER_CHUNK) * 4096L);
+                try {
+                    out.write(len);
+                    l.blocks.exportChunk(i, raw, false);
+                    out.write(raw, 0, 32768);
+                    l.data.exportChunk(i, raw, true);
+                    out.write(raw, 0, 16384);
+                    l.sky.exportChunk(i, raw, true);
+                    out.write(raw, 0, 16384);
+                    l.blk.exportChunk(i, raw, true);
+                    out.write(raw, 0, 16384);
+                    out.write(l.um(i));
+                    out.flush();
+                } finally {
+                    out.close();
+                }
+                l.unsaved[i] = false;
+                n++;
+            }
+            if (fc.fileSize() != CHUNKS_FILE_BYTES) throw new IOException("chunks.dat truncated");
+            Log.i("chunks in place " + n);
+        } finally {
+            fc.close();
+        }
     }
 
     /** Чтение чанков chunks.dat по смещениям: вперёд — пропуском, назад — заново открыв файл. */
@@ -517,12 +623,14 @@ public final class Storage {
             FileConnection fc = (FileConnection) Connector.open(dir + "chunks.dat", Connector.READ);
             try {
                 if (fc.exists()) {
+                    long size = fc.fileSize();
                     InputStream in = fc.openInputStream();
                     try {
                         readChunks(l, in, hasLight, keep);
                     } finally {
                         in.close();
                     }
+                    l.chunksInPlace = hasLight && ourLayout(l, size);
                 }
             } finally {
                 fc.close();
@@ -560,7 +668,8 @@ public final class Storage {
             FileConnection t = (FileConnection) Connector.open(dir + "chunks.tmp", Connector.READ_WRITE);
             try {
                 if (t.exists()) {
-                    if (have) t.delete();
+                    // недописанный tmp (размер не полный) не годится
+                    if (have || t.fileSize() != CHUNKS_FILE_BYTES) t.delete();
                     else t.rename("chunks.dat");
                 }
             } finally {

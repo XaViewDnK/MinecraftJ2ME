@@ -45,7 +45,7 @@ final class Bench {
 
     /** Запуск из MC.debugScreen. */
     static void start(MC mc) {
-        String v = System.getProperty("mcj.bench");
+        String v = Link.prop("mcj.bench");
         if (v == null) return;
         // calm — тот же путь без добавленной нагрузки (мобы, TNT, вода): эталон «обычной игры» для калибровки
         // cmpN — N пар calm/полный поочерёдно, в конце отношение времени кадра (насколько бенчмарк тяжелее)
@@ -62,9 +62,12 @@ final class Bench {
         if (cmp) calm = (left & 1) != 0;
         Bench b = new Bench(mc);
         run = b;
-        // настройки, влияющие на нагрузку, — самые тяжёлые: High и 4 чанка
-        Options.graphics = Options.GFX_HIGH;
-        Options.viewChunks = Options.VIEW_MAX;
+        // настройки, влияющие на нагрузку, — самые тяжёлые: High и 4 чанка (mcj.benchkeep — оставить текущие: замеры
+        // на телефоне по Link при разных настройках)
+        if (Link.prop("mcj.benchkeep") == null) {
+            Options.graphics = Options.GFX_HIGH;
+            Options.viewChunks = Options.VIEW_MAX;
+        }
         Options.peaceful = false;
         Options.thirdPerson = false;
         // все генераторы случайных чисел, влияющие на мир, — с фиксированного зерна

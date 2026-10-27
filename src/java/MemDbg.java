@@ -20,7 +20,7 @@ import javax.microedition.m3g.VertexArray;
  * Файл c:/mcjmem/req (текст — имя отметки) — отметка с дампом по запросу снаружи.
  */
 final class MemDbg {
-    static final String opt = System.getProperty("mcj.mem");
+    static final String opt = BuildCfg.DEBUG ? System.getProperty("mcj.mem") : null;
     static final boolean on = opt != null;
     static final int IMG = 0, I2D = 1, VA = 2, IB = 3, KINDS = 4;
     static final String[] KIND = { "img", "i2d", "va", "ib" };

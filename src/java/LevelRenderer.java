@@ -97,8 +97,12 @@ public final class LevelRenderer {
         Mesh mesh;
         VertexBuffer vb;
         VertexArray pa, ca, ta;
-        int cls, verts, dir, key, comps;
+        int cls, verts, dir, key, comps, fmt;
+        /** вершин в индексах меша (verts, округлённое до 8; остаток — вырожденные квады) */
+        int ibVerts;
         boolean bytes, on;
+        /** склеенные грани с текстурой повторов (repApp) */
+        boolean rep;
         /** биас развёртки байтами */
         float[] uvBias;
         /** квады: код света | затенение << 8 | оттенок << 10 — для перекраски без склейки */
@@ -135,6 +139,19 @@ public final class LevelRenderer {
         for (int g = 0; g < NG; g++) blendSlot[g] = -1;
     }
 
+    /** режимы граней мира (app[] и твёрдый меш) — перспективная коррекция переключается настройкой */
+    private static final PolygonMode[] worldPm = new PolygonMode[4];
+    private static boolean perspective = true;
+
+    /**
+     * Перспективная коррекция развёртки мира: Low её выключает — на телефонах с программным M3G (K800i) это
+     * заметная часть закраски, искажение текстур видно лишь на гранях вплотную к камере.
+     */
+    static void setPerspective(boolean on) {
+        perspective = on;
+        for (int i = 0; i < worldPm.length; i++) if (worldPm[i] != null) worldPm[i].setPerspectiveCorrectionEnable(on);
+    }
+
     private static void initShared(Image2D terrain) {
         // режим limit= отладки памяти эмулирует телефон: пул ограничен и чистится при нехватке памяти
         keepPool = BtNet.onLoader() && !MemDbg.limited();
@@ -149,7 +166,8 @@ public final class LevelRenderer {
             CompositingMode cm = new CompositingMode();
             PolygonMode pm = new PolygonMode();
             pm.setShading(PolygonMode.SHADE_SMOOTH);
-            pm.setPerspectiveCorrectionEnable(true);
+            pm.setPerspectiveCorrectionEnable(perspective);
+            worldPm[i] = pm;
             if (i == Tile.L_OPAQUE) {
                 cm.setBlending(CompositingMode.REPLACE);
                 pm.setCulling(PolygonMode.CULL_BACK);
@@ -175,12 +193,14 @@ public final class LevelRenderer {
         scm.setAlphaThreshold(0.5f);
         PolygonMode spm = new PolygonMode();
         spm.setShading(PolygonMode.SHADE_SMOOTH);
-        spm.setPerspectiveCorrectionEnable(true);
+        spm.setPerspectiveCorrectionEnable(perspective);
+        worldPm[3] = spm;
         spm.setCulling(PolygonMode.CULL_BACK);
         solid.setCompositingMode(scm);
         solid.setPolygonMode(spm);
         solid.setFog(fog);
         meshApp[0] = solid;
+        initRep(solid);
         meshApp[1] = app[Tile.L_BLEND];
         Appearance b = app[Tile.L_BLEND];
         for (int i = 0; i < blendApp.length; i++) {
@@ -562,6 +582,7 @@ public final class LevelRenderer {
             cInfo = new short[PART_MAX / 4];
         }
         lightTable();
+        if (Prof.on && Prof.x('G')) greedyStats(g);
         int gx = (g % GW) << GS, gz = (g / GW) << GS;
         int y0 = 99, y1 = -1;
         for (int k = 0; k < NM; k++) {
@@ -577,7 +598,9 @@ public final class LevelRenderer {
             }
             for (int b = 0; b < 7; b++) {
                 cVerts = 0;
-                int nc = k == 0 ? 3 : 4;
+                int nc = comps(k);
+                // твёрдые грани целыми блоками из частых тайлов — потом, склеенными (mergeRects)
+                boolean merge = k == 0 && b < 6 && repApp != null && !Prof.x('m');
                 for (int sy = 0; sy < SY; sy++) {
                     int i = g | (sy << 8);
                     int v = sVerts[k][i];
@@ -588,6 +611,7 @@ public final class LevelRenderer {
                     for (int qi = 0, n = v >> 2; qi < n; qi++) {
                         int info = q[qi];
                         if (((info >> 10) & 7) != b) continue;
+                        if (merge && mergeCell(p, lv, qi, info, b) >= 0) continue;
                         if (cVerts + 4 > PART_MAX) flushPart(k, b, gx, gz);
                         int lt = lightRgb[((info & 255) << 2) | ((info >> 8) & 3)], tint = SecBuf.tints[(info >>> 21) & 255];
                         int tile = (info >>> 13) & 255, tu = (tile & 15) << 4, tv = tile & 0xF0;
@@ -603,7 +627,7 @@ public final class LevelRenderer {
                             cCol[o] = cr;
                             cCol[o + 1] = cg;
                             cCol[o + 2] = cb;
-                            if (nc == 4) cCol[o + 3] = ca;
+                            if (nc == 4) cCol[o + 3] = k == 0 ? (byte) -1 : ca;
                             cUv[d * 2] = (short) (tu + (pp >>> 27));
                             cUv[d * 2 + 1] = (short) (tv + lv[j]);
                             cVerts = d + 1;
@@ -611,6 +635,7 @@ public final class LevelRenderer {
                     }
                 }
                 if (cVerts > 0) flushPart(k, b, gx, gz);
+                if (merge) mergeRects(g, b, gx, gz, nc);
             }
             if (nParts == 0) continue;
             Part[] ps = new Part[nParts];
@@ -654,11 +679,245 @@ public final class LevelRenderer {
                         cCol[o] = cr;
                         cCol[o + 1] = cg;
                         cCol[o + 2] = cb;
-                        if (nc == 4) cCol[o + 3] = ca;
+                        if (nc == 4) cCol[o + 3] = k == 0 ? (byte) -1 : ca;
                     }
                 }
                 p.ca.set(0, p.verts, cCol);
             }
+        }
+    }
+
+    /**
+     * Отладка «exp G»: сколько квадов твёрдого мира столбца склеилось бы в прямоугольники (то же направление,
+     * плоскость, блок, свет и оттенок; только целые грани 16x16 по сетке блоков, в пределах секции).
+     */
+    private void greedyStats(int g) {
+        java.util.Hashtable h = new java.util.Hashtable();
+        for (int sy = 0; sy < SY; sy++) {
+            int i = g | (sy << 8);
+            int v = sVerts[0][i];
+            if (v == 0 || sP[0][i] == null) continue;
+            int[] p = sP[0][i], q = sQ[0][i];
+            h.clear();
+            for (int qi = 0, n = v >> 2; qi < n; qi++) {
+                int info = q[qi], b = (info >> 10) & 7;
+                Prof.gQuads++;
+                if (b >= 6) continue;
+                int x0 = 9999, y0 = 9999, z0 = 9999, x1 = -9999, y1 = -9999, z1 = -9999;
+                for (int j = qi << 2; j < (qi << 2) + 4; j++) {
+                    int x = SecBuf.px(p[j]), y = SecBuf.py(p[j]), z = SecBuf.pz(p[j]);
+                    if (x < x0) x0 = x; if (x > x1) x1 = x;
+                    if (y < y0) y0 = y; if (y > y1) y1 = y;
+                    if (z < z0) z0 = z; if (z > z1) z1 = z;
+                }
+                int axis = b >> 1, plane, u, w, du, dw;
+                if (axis == 0) { plane = x0; u = y0; w = z0; du = y1 - y0; dw = z1 - z0; }
+                else if (axis == 1) { plane = y0; u = x0; w = z0; du = x1 - x0; dw = z1 - z0; }
+                else { plane = z0; u = x0; w = y0; du = x1 - x0; dw = y1 - y0; }
+                if (du != 16 || dw != 16 || (u & 15) != 0 || (w & 15) != 0 || u < 0 || w < 0 || u > 255 || w > 255) continue;
+                Prof.gFull++;
+                // биты по горизонтали развёртки: у граней X это z (w), у остальных x (u)
+                int tu = axis == 0 ? w : u, tw = axis == 0 ? u : w;
+                Long key = new Long(((long) info << 20) | ((long) (plane + 64) << 3) | b);
+                int[] bits = (int[]) h.get(key);
+                if (bits == null) h.put(key, bits = new int[17]);
+                bits[tw >> 4] |= 1 << (tu >> 4);
+                bits[16] = (info >>> 13) & 255;
+                Prof.gTile[bits[16]][0]++;
+            }
+            for (java.util.Enumeration e = h.elements(); e.hasMoreElements();) {
+                int[] bits = (int[]) e.nextElement();
+                int[] st = Prof.gTile[bits[16]];
+                st[1] += rects(bits, 16, 16);
+                st[2] += rects(bits, 16, 1);
+                st[3] += rects(bits, 4, 4);
+                st[4] += rects(bits, 8, 8);
+            }
+        }
+    }
+
+    /** число прямоугольников жадной склейки битовой карты 16x16 при размере не больше mw x mh */
+    private static int rects(int[] src, int mw, int mh) {
+        int[] bits = new int[16];
+        System.arraycopy(src, 0, bits, 0, 16);
+        int n = 0;
+        for (int r = 0; r < 16; r++)
+            while (bits[r] != 0) {
+                int c = 0;
+                while ((bits[r] & (1 << c)) == 0) c++;
+                int c1 = c;
+                while (c1 < 16 && c1 - c < mw && (bits[r] & (1 << c1)) != 0) c1++;
+                int mask = ((1 << c1) - 1) & ~((1 << c) - 1);
+                int r1 = r;
+                while (r1 < 16 && r1 - r < mh && (bits[r1] & mask) == mask) bits[r1++] &= ~mask;
+                n++;
+            }
+        return n;
+    }
+
+    // ---- склейка граней: соседние целые грани одного тайла, света и оттенка — один квад до REP x REP блоков ----
+
+    /** частые тайлы мира: у каждого в текстуре повторов квадрат 4x4 копии (64x64 пикселя) */
+    private static final int[] REP_TILES = { 0, 1, 2, 3, 4, 16, 18, 19, 20, 21, 52, 53, 66, 68, 116, 117 };
+    private static final byte[] repSlot = new byte[256];
+    static final int REP = 4;
+    static Texture2D repTex;
+    static Appearance repApp;
+    /** следующая часть — склеенные грани */
+    private boolean emitRep;
+    private final java.util.Hashtable mergeMap = new java.util.Hashtable();
+    private final java.util.Vector mergeFree = new java.util.Vector();
+
+    /** Текстура повторов и её Appearance — как у твёрдого мира (meshApp[0]), только другая текстура и WRAP. */
+    private static void initRep(Appearance solid) {
+        for (int i = 0; i < 256; i++) repSlot[i] = -1;
+        int[] px = new int[256 * 256];
+        for (int sl = 0; sl < REP_TILES.length; sl++) {
+            int t = REP_TILES[sl];
+            repSlot[t] = (byte) sl;
+            int[] src = R.terrain.region((t & 15) << 4, t & 0xF0, 16, 16);
+            int bx = (sl & 3) * 64, by = (sl >> 2) * 64;
+            for (int y = 0; y < 64; y++)
+                for (int x = 0; x < 64; x++) px[(by + y) * 256 + bx + x] = src[(y & 15) * 16 + (x & 15)];
+        }
+        Image2D im = new Pix(px, 256, 256).image2D();
+        px = null;
+        repTex = new Texture2D(im);
+        repTex.setFiltering(Texture2D.FILTER_BASE_LEVEL, Texture2D.FILTER_NEAREST);
+        repTex.setWrapping(Texture2D.WRAP_CLAMP, Texture2D.WRAP_CLAMP);
+        repTex.setBlending(Texture2D.FUNC_MODULATE);
+        Appearance a = new Appearance();
+        a.setTexture(0, repTex);
+        a.setCompositingMode(solid.getCompositingMode());
+        a.setPolygonMode(solid.getPolygonMode());
+        a.setFog(solid.getFog());
+        repApp = a;
+    }
+
+    /**
+     * Квад qi секции годится для склейки: целая грань блока направления b из тайла с местом в текстуре повторов,
+     * развёртка — углы тайла. Вернуть клетку h | v << 4 в плоскости секции (h — вдоль горизонтали, v — второе
+     * направление) либо -1.
+     */
+    private static int mergeCell(int[] p, byte[] lv, int qi, int info, int b) {
+        if (repSlot[(info >>> 13) & 255] < 0) return -1;
+        int axis = b >> 1, h0 = 9999, h1 = -9999, v0 = 9999, v1 = -9999, pl = 9999;
+        for (int j = qi << 2, e = j + 4; j < e; j++) {
+            int pp = p[j], x = SecBuf.px(pp), y = SecBuf.py(pp), z = SecBuf.pz(pp);
+            int ou = pp >>> 27, ov = lv[j];
+            if ((ou != 0 && ou != 16) || (ov != 0 && ov != 16)) return -1;
+            int h = axis == 0 ? z : x, v = axis == 1 ? z : y, c = axis == 0 ? x : (axis == 1 ? y : z);
+            if (pl == 9999) pl = c;
+            else if (pl != c) return -1;
+            if (h < h0) h0 = h; if (h > h1) h1 = h;
+            if (v < v0) v0 = v; if (v > v1) v1 = v;
+        }
+        if (h1 - h0 != 16 || v1 - v0 != 16 || (h0 & 15) != 0 || (v0 & 15) != 0 || h0 < 0 || v0 < 0 || h0 > 240 || v0 > 240) return -1;
+        // каждая ось развёртки идёт вдоль одной из осей грани
+        int ua = -1;
+        for (int a = 0; a < 2 && ua < 0; a++) {
+            boolean ok = true;
+            int inv = -1;
+            for (int j = qi << 2, e = j + 4; j < e && ok; j++) {
+                int pp = p[j], x = SecBuf.px(pp), y = SecBuf.py(pp), z = SecBuf.pz(pp);
+                int h = axis == 0 ? z : x, v = axis == 1 ? z : y;
+                // u — вдоль оси a (в любую сторону)
+                int d = (a == 0 ? h == h1 : v == v1) != ((pp >>> 27) != 0) ? 1 : 0;
+                if (inv < 0) inv = d;
+                else if (d != inv) ok = false;
+            }
+            if (ok) ua = a;
+        }
+        if (ua < 0) return -1;
+        return (h0 >> 4) | ((v0 >> 4) << 4) | (ua << 8) | ((pl + 64) << 9);
+    }
+
+    /** Склеить годные квады направления b столбца g по секциям и выдать отдельной частью (repApp). */
+    private void mergeRects(int g, int b, int gx, int gz, int nc) {
+        int lim = perspective ? REP : 2;
+        emitRep = true;
+        cVerts = 0;
+        for (int sy = 0; sy < SY; sy++) {
+            int i = g | (sy << 8);
+            int v = sVerts[0][i];
+            if (v == 0 || sP[0][i] == null) continue;
+            int[] p = sP[0][i], q = sQ[0][i];
+            byte[] lv = sLv[0][i];
+            java.util.Hashtable map = mergeMap;
+            for (int qi = 0, n = v >> 2; qi < n; qi++) {
+                int info = q[qi];
+                if (((info >> 10) & 7) != b) continue;
+                int c = mergeCell(p, lv, qi, info, b);
+                if (c < 0) continue;
+                // одна развёртка на группу: знаки углов развёртки 4 вершин
+                int sig = 0;
+                for (int j = 0; j < 4; j++) sig |= (((p[(qi << 2) + j] >>> 27) != 0 ? 1 : 0) | (lv[(qi << 2) + j] != 0 ? 2 : 0)) << (j * 2);
+                Long key = new Long(((long) info << 24) | ((long) (c >> 8) << 8) | sig);
+                int[] bits = (int[]) map.get(key);
+                if (bits == null) {
+                    bits = mergeFree.size() > 0 ? (int[]) mergeFree.elementAt(mergeFree.size() - 1) : new int[17];
+                    if (mergeFree.size() > 0) mergeFree.removeElementAt(mergeFree.size() - 1);
+                    for (int r = 0; r < 16; r++) bits[r] = 0;
+                    bits[16] = qi;
+                    map.put(key, bits);
+                }
+                bits[(c >> 4) & 15] |= 1 << (c & 15);
+            }
+            if (map.isEmpty()) continue;
+            int dy = sy * 256;
+            for (java.util.Enumeration e = map.elements(); e.hasMoreElements();) {
+                int[] bits = (int[]) e.nextElement();
+                int rq = bits[16];
+                for (int r = 0; r < 16; r++)
+                    while (bits[r] != 0) {
+                        int c = 0;
+                        while ((bits[r] & (1 << c)) == 0) c++;
+                        int c1 = c;
+                        while (c1 < 16 && c1 - c < lim && (bits[r] & (1 << c1)) != 0) c1++;
+                        int mask = ((1 << c1) - 1) & ~((1 << c) - 1);
+                        int r1 = r;
+                        while (r1 < 16 && r1 - r < lim && (bits[r1] & mask) == mask) bits[r1++] &= ~mask;
+                        if (cVerts + 4 > PART_MAX) flushPart(0, b, gx, gz);
+                        emitRect(p, lv, rq, q[rq], b, c, c1, r, r1, dy, nc);
+                    }
+                mergeFree.addElement(bits);
+            }
+            map.clear();
+        }
+        if (cVerts > 0) flushPart(0, b, gx, gz);
+        emitRep = false;
+    }
+
+    /** Квад-образец rq, растянутый на клетки [h0,h1) x [v0,v1) плоскости; развёртка — в месте тайла в текстуре повторов. */
+    private void emitRect(int[] p, byte[] lv, int rq, int info, int b, int h0, int h1, int v0, int v1, int dy, int nc) {
+        int axis = b >> 1;
+        int c = mergeCell(p, lv, rq, info, b), ua = (c >> 8) & 1;
+        int rh1 = ((c & 15) << 4) + 16, rv1 = (((c >> 4) & 15) << 4) + 16;
+        int slot = repSlot[(info >>> 13) & 255], su = (slot & 3) * 64, sv = (slot >> 2) * 64;
+        int spanU = ua == 0 ? h1 - h0 : v1 - v0, spanV = ua == 0 ? v1 - v0 : h1 - h0;
+        int lt = lightRgb[((info & 255) << 2) | ((info >> 8) & 3)], tint = SecBuf.tints[(info >>> 21) & 255];
+        byte cr = (byte) (((tint >> 16) & 255) * lt / 255), cg = (byte) (((tint >> 8) & 255) * lt / 255);
+        byte cb = (byte) ((tint & 255) * lt / 255);
+        cInfo[cVerts >> 2] = (short) ((info & 1023) | (((info >>> 21) & 63) << 10));
+        for (int j = rq << 2, e = j + 4; j < e; j++) {
+            int pp = p[j], x = SecBuf.px(pp), y = SecBuf.py(pp), z = SecBuf.pz(pp);
+            int h = axis == 0 ? z : x, v = axis == 1 ? z : y;
+            int nh = (h == rh1 ? h1 : h0) << 4, nv = (v == rv1 ? v1 : v0) << 4;
+            if (axis == 0) { z = nh; y = nv; }
+            else if (axis == 1) { x = nh; z = nv; }
+            else { x = nh; y = nv; }
+            int d = cVerts;
+            cPos[d * 3] = (short) x;
+            cPos[d * 3 + 1] = (short) (y + dy);
+            cPos[d * 3 + 2] = (short) z;
+            int o = d * nc;
+            cCol[o] = cr;
+            cCol[o + 1] = cg;
+            cCol[o + 2] = cb;
+            if (nc == 4) cCol[o + 3] = (byte) -1;
+            cUv[d * 2] = (short) (su + ((pp >>> 27) != 0 ? spanU * 16 : 0));
+            cUv[d * 2 + 1] = (short) (sv + (lv[j] != 0 ? spanV * 16 : 0));
+            cVerts = d + 1;
         }
     }
 
@@ -667,6 +926,7 @@ public final class LevelRenderer {
         cVerts = 0;
         Part p = makePart(n, k, gx, gz);
         p.dir = b;
+        p.rep = emitRep;
         p.plane = b < 6 ? plane(n, b, gx, gz) : 0;
         if (nParts == parts.length) {
             Part[] np = new Part[nParts * 2];
@@ -736,12 +996,19 @@ public final class LevelRenderer {
             if (v < v0) v0 = v;
             if (v > v1) v1 = v;
         }
-        boolean uvBytes = u1 - u0 <= 255 && v1 - v0 <= 255;
-        int nc = k == 0 ? 3 : 4;
+        boolean uvBytes = u1 - u0 <= 255 && v1 - v0 <= 255 && !Prof.x('u');
+        if (Prof.x('b')) bytes = false;
+        int nc = comps(k);
+        // отладка форматов вершин (Link «exp» + «rebuild»): части пула другого формата не берутся
+        int fmt = (Prof.x('C') && k == 0 ? 1 : 0) | nc << 1;
         int cls = capClass(n), cap = CAPS[cls];
         int key = (((cls * 2 + (bytes ? 1 : 0)) * 2 + (uvBytes ? 1 : 0)) * 2) + k;
         java.util.Vector pl = pool[key];
         Part part;
+        while (pl.size() > 0 && ((Part) pl.elementAt(pl.size() - 1)).fmt != fmt) {
+            pl.removeElementAt(pl.size() - 1);
+            pooledVerts -= cap;
+        }
         if (pl.size() > 0) {
             part = (Part) pl.elementAt(pl.size() - 1);
             pl.removeElementAt(pl.size() - 1);
@@ -752,6 +1019,7 @@ public final class LevelRenderer {
             part.bytes = bytes;
             part.key = key;
             part.comps = nc;
+            part.fmt = fmt;
             part.pa = new VertexArray(cap, 3, bytes ? 1 : 2);
             if (MemDbg.on) MemDbg.va(part.pa, "LevelRenderer.pa");
             part.ca = new VertexArray(cap, nc, 1);
@@ -761,35 +1029,44 @@ public final class LevelRenderer {
             part.info = new short[cap >> 2];
             if (uvBytes) part.uvBias = new float[2];
             part.vb = new VertexBuffer();
-            part.vb.setColors(part.ca);
+            if ((fmt & 1) == 0) part.vb.setColors(part.ca);
             part.vb.setTexCoords(0, part.ta, 1f / 256f, null);
             part.vb.setPositions(part.pa, 1f, null);
-            part.mesh = new Mesh(part.vb, MeshBuilder.strips(cap), meshApp[0]);
-            part.mesh.setRenderingEnable(false);
         }
         part.verts = n;
+        // индексы только на занятые вершины (округление до 8 — меньше разных TriangleStripArray в кэше):
+        // драйвер обрабатывает каждую вершину индексов, пустые хвосты класса ёмкости были ~6.5 % вершин мира.
+        // Индексы Mesh не меняются — меш части создаётся заново, когда меняется их число
+        int ibn = Math.min(cap, (n + 7) & ~7);
+        if (part.mesh == null || part.ibVerts != ibn) {
+            // в J2ME Loader M3G-объекты не должны становиться мусором (см. DynMesh)
+            if (part.mesh != null && keepPool) DynMesh.KEEP.addElement(part.mesh);
+            part.mesh = new Mesh(part.vb, MeshBuilder.strips(ibn), meshApp[0]);
+            part.mesh.setRenderingEnable(false);
+            part.ibVerts = ibn;
+        }
         int last = n - 1;
         if (bytes) {
             for (int a = 0; a < 3; a++) {
                 int u = unit[a], o = min[a] + 128;
                 for (int j = a, e = n * 3; j < e; j += 3) bPos[j] = (byte) (p[j] / u - o);
                 byte pad = (byte) (p[last * 3 + a] / u - o);
-                for (int d = n * 3 + a; d < cap * 3; d += 3) bPos[d] = pad;
+                for (int d = n * 3 + a; d < ibn * 3; d += 3) bPos[d] = pad;
                 bias[a] = o;
             }
-            part.pa.set(0, cap, bPos);
+            part.pa.set(0, ibn, bPos);
         } else {
-            for (int d = n * 3; d < cap * 3; d += 3) {
+            for (int d = n * 3; d < ibn * 3; d += 3) {
                 p[d] = p[last * 3];
                 p[d + 1] = p[last * 3 + 1];
                 p[d + 2] = p[last * 3 + 2];
             }
             unit[0] = unit[1] = unit[2] = 1;
             bias[0] = bias[1] = bias[2] = 0;
-            part.pa.set(0, cap, p);
+            part.pa.set(0, ibn, p);
         }
-        for (int d = n * nc; d < cap * nc; d++) cCol[d] = 0;
-        part.ca.set(0, cap, cCol);
+        for (int d = n * nc; d < ibn * nc; d++) cCol[d] = 0;
+        part.ca.set(0, ibn, cCol);
         System.arraycopy(cInfo, 0, part.info, 0, n >> 2);
         if (uvBytes) {
             int bu = u0 + 128, bv = v0 + 128;
@@ -798,29 +1075,34 @@ public final class LevelRenderer {
                 b[j] = (byte) (uv[j] - bu);
                 b[j + 1] = (byte) (uv[j + 1] - bv);
             }
-            for (int d = n * 2; d < cap * 2; d += 2) {
+            for (int d = n * 2; d < ibn * 2; d += 2) {
                 b[d] = 0;
                 b[d + 1] = 0;
             }
-            part.ta.set(0, cap, b);
+            part.ta.set(0, ibn, b);
             part.uvBias[0] = bu / 256f;
             part.uvBias[1] = bv / 256f;
             part.vb.setTexCoords(0, part.ta, 1f / 256f, part.uvBias);
         } else {
-            for (int d = n * 2; d < cap * 2; d++) cUv[d] = 0;
-            part.ta.set(0, cap, cUv);
+            for (int d = n * 2; d < ibn * 2; d++) cUv[d] = 0;
+            part.ta.set(0, ibn, cUv);
         }
         part.vb.setPositions(part.pa, 1f, bias);
-        Appearance ap = k == 0 ? meshApp[0] : blendApp[0];
+        Appearance ap = k == 0 ? (emitRep ? repApp : meshApp[0]) : blendApp[0];
         if (part.mesh.getAppearance(0) != ap) part.mesh.setAppearance(0, ap);
         part.mesh.setTranslation(gx << 4, 0, gz << 4);
         part.mesh.setScale(unit[0] / 16f, unit[1] / 16f, unit[2] / 16f);
         if (Prof.on) {
             if (bytes) Prof.bytesVerts += n;
             else Prof.shortVerts += n;
-            Prof.padVerts += cap - n;
+            Prof.padVerts += ibn - n;
         }
         return part;
+    }
+
+    /** компоненты цвета вершин: твёрдый мир — RGB (отладка «exp c» — RGBA), полупрозрачный — RGBA */
+    private static int comps(int k) {
+        return k == 0 && !Prof.x('c') ? 3 : 4;
     }
 
     private boolean columnReady(int g) {
@@ -1399,6 +1681,9 @@ public final class LevelRenderer {
      * Отрисовать видимые секции. (ex,ey,ez) — глаз, (fx,fy,fz) — направление взгляда, cosHalf — косинус половины угла обзора.
      */
     private int blendCount;
+    private final Transform immT = new Transform();
+    private final int[] zOrd = new int[NG];
+    private final float[] zDist = new float[NG];
     private float camX, camY, camZ;
 
     /** Твёрдый мир: отсечение групп по пирамиде видимости и туману и граней, повёрнутых от камеры; один render(Node). */
@@ -1429,7 +1714,36 @@ public final class LevelRenderer {
         blendCount = n;
         if (Prof.x('n')) return n;
         long t0 = Prof.t();
-        g3d.render(root[0], null);
+        if (Prof.x('i') || Prof.x('z')) {
+            // отладка: каждая часть отдельным render(vb, ib, app, transform) вместо обхода группы; z — от ближних столбцов
+            int nz = 0;
+            for (int g = 0; g < NG; g++) {
+                if (gpart[0][g] == null || !shown[0][g]) continue;
+                float dx = (g % GW) * GB + GB / 2 - camX, dz = (g / GW) * GB + GB / 2 - camZ, d = dx * dx + dz * dz;
+                int j = nz++;
+                if (Prof.x('z')) for (; j > 0 && zDist[j - 1] > d; j--) { zDist[j] = zDist[j - 1]; zOrd[j] = zOrd[j - 1]; }
+                zDist[j] = d;
+                zOrd[j] = g;
+            }
+            for (int q = 0; q < nz; q++) {
+                int g = zOrd[q];
+                Part[] sp = gpart[0][g];
+                if (sp == null || !shown[0][g]) continue;
+                for (int i = 0; i < sp.length; i++) {
+                    Part p = sp[i];
+                    if (!p.on) continue;
+                    p.mesh.getCompositeTransform(immT);
+                    g3d.render(p.vb, p.mesh.getIndexBuffer(0), p.mesh.getAppearance(0), immT);
+                    if (Prof.on) Prof.meshes++;
+                }
+            }
+        } else {
+            g3d.render(root[0], null);
+            if (Prof.on) for (int g = 0; g < NG; g++) {
+                Part[] sp = gpart[0][g];
+                if (sp != null && shown[0][g]) for (int i = 0; i < sp.length; i++) if (sp[i].on) Prof.meshes++;
+            }
+        }
         if (Prof.on) {
             Prof.call(verts, t0);
             Prof.drawVerts += verts;
@@ -1481,7 +1795,7 @@ public final class LevelRenderer {
                 p.on = v;
                 p.mesh.setRenderingEnable(v);
             }
-            if (v) verts += CAPS[p.cls];
+            if (v) verts += p.ibVerts;
         }
         return verts;
     }
