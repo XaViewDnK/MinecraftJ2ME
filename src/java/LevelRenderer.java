@@ -368,20 +368,33 @@ public final class LevelRenderer {
         }
         int pcx = Mth.floor(cx) >> 4, pcz = Mth.floor(cz) >> 4;
         int maxR = renderDist / 16 + 3;
+        // кольцами от игрока, внутри кольца — столбец целиком и сразу склейка: квады секций (до 1 МБ на кольцо)
+        // держатся только у недостроенного столбца, а не у всего кольца, пока строится слой за слоем
         for (int r = 0; r <= maxR; r++) {
-            for (int sy = 0; sy < SY; sy++)
-                for (int sx = pcx - r; sx <= pcx + r; sx++)
-                    for (int sz = pcz - r; sz <= pcz + r; sz++) {
-                        if (Math.max(Math.abs(sx - pcx), Math.abs(sz - pcz)) != r) continue;
-                        if (sx < 0 || sz < 0 || sx >= SX || sz >= SZ) continue;
+            for (int sx = pcx - r; sx <= pcx + r; sx++)
+                for (int sz = pcz - r; sz <= pcz + r; sz++) {
+                    if (Math.max(Math.abs(sx - pcx), Math.abs(sz - pcz)) != r) continue;
+                    if (sx < 0 || sz < 0 || sx >= SX || sz >= SZ) continue;
+                    boolean any = false;
+                    for (int sy = 0; sy < SY; sy++) {
                         int i = sx + (sz << 4) + (sy << 8);
                         if (!dirty[i]) continue;
                         rebuild(i);
+                        any = true;
                         if (System.currentTimeMillis() - start > budgetMs) {
                             combineDirty(start, budgetMs);
                             return;
                         }
                     }
+                    int g = group(sx, sz);
+                    if (any && grpDirty[g] && columnReady(g)) {
+                        grpUrgent[g] = false;
+                        long t0 = Prof.t();
+                        combine(g);
+                        Prof.combines++;
+                        if (Prof.on) Prof.add(Prof.M_COMB, t0);
+                    }
+                }
         }
         combineDirty(start, budgetMs);
     }

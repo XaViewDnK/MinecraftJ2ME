@@ -233,7 +233,17 @@ public final class Storage {
     }
 
     public static void saveChunks(Level l) throws IOException {
+        // под замком мира: подгрузка и выгрузка чанков не меняют набор выгруженных посреди записи
+        synchronized (l) {
+            saveChunks0(l);
+        }
+    }
+
+    private static void saveChunks0(Level l) throws IOException {
         String dir = base + l.folder + "/";
+        // выгруженные чанки есть только в старом файле: новый пишется рядом (chunks.tmp) и подменяет старый
+        boolean copy = l.goneCount > 0 && l.chunkFile != null;
+        ChunkIn old = copy ? new ChunkIn(l.chunkFile) : null;
         byte[] header = new byte[4096];
         int[] order = new int[256];
         for (int i = 0; i < 256; i++) {
@@ -247,7 +257,7 @@ public final class Storage {
             header[hi + 3] = (byte) (off >> 24);
             order[i] = i;
         }
-        FileConnection fc = (FileConnection) Connector.open(dir + "chunks.dat", Connector.READ_WRITE);
+        FileConnection fc = (FileConnection) Connector.open(dir + (copy ? "chunks.tmp" : "chunks.dat"), Connector.READ_WRITE);
         try {
             if (!fc.exists()) fc.create();
             else fc.truncate(0);
@@ -260,15 +270,26 @@ public final class Storage {
                 byte[] raw = new byte[32768];
                 for (int i = 0; i < 256; i++) {
                     out.write(len);
-                    l.blocks.exportChunk(i, raw, false);
-                    out.write(raw, 0, 32768);
-                    l.data.exportChunk(i, raw, true);
-                    out.write(raw, 0, 16384);
-                    l.sky.exportChunk(i, raw, true);
-                    out.write(raw, 0, 16384);
-                    l.blk.exportChunk(i, raw, true);
-                    out.write(raw, 0, 16384);
-                    out.write(l.updateMap[i]);
+                    if (l.gone[i]) {
+                        // выгруженный чанк не менялся с прошлого сохранения — слои как есть из старого файла
+                        int left = old.open(l.chunkOff[i]), got = readPart(old.in, raw, 32768, left);
+                        out.write(raw, 0, 32768);
+                        for (int k = 0; k < 3; k++) {
+                            got += readPart(old.in, raw, 16384, left - got);
+                            out.write(raw, 0, 16384);
+                        }
+                        old.pos += got;
+                    } else {
+                        l.blocks.exportChunk(i, raw, false);
+                        out.write(raw, 0, 32768);
+                        l.data.exportChunk(i, raw, true);
+                        out.write(raw, 0, 16384);
+                        l.sky.exportChunk(i, raw, true);
+                        out.write(raw, 0, 16384);
+                        l.blk.exportChunk(i, raw, true);
+                        out.write(raw, 0, 16384);
+                    }
+                    out.write(l.um(i));
                     out.write(pad);
                     l.unsaved[i] = false;
                 }
@@ -276,8 +297,81 @@ public final class Storage {
             } finally {
                 out.close();
             }
+            if (copy) {
+                old.close();
+                FileConnection f = (FileConnection) Connector.open(dir + "chunks.dat", Connector.READ_WRITE);
+                try {
+                    if (f.exists()) f.delete();
+                } finally {
+                    f.close();
+                }
+                fc.rename("chunks.dat");
+            }
         } finally {
+            if (old != null) old.close();
             fc.close();
+        }
+        // теперь выгруженные чанки подгружаются из нового файла (раскладка: чанк i — сектор 1 + i * SECTORS_PER_CHUNK)
+        l.chunkFile = dir + "chunks.dat";
+        for (int i = 0; i < 256; i++) l.chunkOff[i] = (1 + i * SECTORS_PER_CHUNK) * 4096;
+    }
+
+    /** Чтение чанков chunks.dat по смещениям: вперёд — пропуском, назад — заново открыв файл. */
+    static final class ChunkIn {
+        final String url;
+        FileConnection fc;
+        InputStream in;
+        long pos;
+
+        ChunkIn(String url) {
+            this.url = url;
+        }
+
+        /** встать на чанк по смещению off (байт), прочитать длину; вернуть байт данных чанка */
+        int open(int off) throws IOException {
+            if (in == null || off < pos) {
+                close();
+                fc = (FileConnection) Connector.open(url, Connector.READ);
+                in = fc.openInputStream();
+                pos = 0;
+            }
+            skipFully(in, off - pos);
+            byte[] lenb = new byte[4];
+            readFully(in, lenb, 0, 4);
+            pos = off + 4;
+            return le(lenb, 0) - 4;
+        }
+
+        void close() {
+            try {
+                if (in != null) in.close();
+            } catch (IOException e) {
+            }
+            try {
+                if (fc != null) fc.close();
+            } catch (IOException e) {
+            }
+            in = null;
+            fc = null;
+        }
+    }
+
+    /** Подгрузка выгруженного чанка (Level.fault): слои из chunks.dat, updateMap в памяти не выгружается. */
+    static void readChunk(Level l, int ch) throws IOException {
+        ChunkIn ci = new ChunkIn(l.chunkFile);
+        try {
+            int left = ci.open(l.chunkOff[ch]);
+            byte[] b = new byte[32768];
+            left -= readPart(ci.in, b, 32768, left);
+            l.blocks.importChunk(ch, b, false);
+            left -= readPart(ci.in, b, 16384, left);
+            l.data.importChunk(ch, b, true);
+            left -= readPart(ci.in, b, 16384, left);
+            l.sky.importChunk(ch, b, true);
+            readPart(ci.in, b, 16384, left);
+            l.blk.importChunk(ch, b, true);
+        } finally {
+            ci.close();
         }
     }
 
@@ -398,13 +492,26 @@ public final class Storage {
             l.storageVersion = 1;
         }
         boolean hasLight = l.storageVersion >= 1;
+        recoverTmp(dir);
+        // мир со светом в файле грузится по чанкам: дальние от игрока сразу выгружаются (в памяти не весь мир)
+        boolean[] keep = null;
+        l.chunkFile = dir + "chunks.dat";
+        if (hasLight && l.canEvict()) {
+            float px = l.spawnX, pz = l.spawnZ;
+            Nbt.NList pos = l.playerTag != null ? l.playerTag.getList("Pos") : null;
+            if (pos != null && pos.size() >= 3) {
+                px = pos.getFloat(0);
+                pz = pos.getFloat(2);
+            }
+            keep = l.keepSet(px, pz);
+        }
         try {
             FileConnection fc = (FileConnection) Connector.open(dir + "chunks.dat", Connector.READ);
             try {
                 if (fc.exists()) {
                     InputStream in = fc.openInputStream();
                     try {
-                        readChunks(l, in, hasLight);
+                        readChunks(l, in, hasLight, keep);
                     } finally {
                         in.close();
                     }
@@ -424,12 +531,37 @@ public final class Storage {
                 Log.e("entities.dat", t);
             }
         }
+        // при загрузке по чанкам высоты посчитаны при чтении
         if (!hasLight) l.recalcAllLight();
-        else l.recalcHeightmap();
+        else if (keep == null) l.recalcHeightmap();
         return l;
     }
 
-    private static void readChunks(Level l, InputStream in, boolean hasLight) throws IOException {
+    /** запись chunks.dat прервалась между удалением старого и переименованием нового — взять новый */
+    private static void recoverTmp(String dir) {
+        try {
+            FileConnection d = (FileConnection) Connector.open(dir + "chunks.dat", Connector.READ);
+            boolean have;
+            try {
+                have = d.exists();
+            } finally {
+                d.close();
+            }
+            FileConnection t = (FileConnection) Connector.open(dir + "chunks.tmp", Connector.READ_WRITE);
+            try {
+                if (t.exists()) {
+                    if (have) t.delete();
+                    else t.rename("chunks.dat");
+                }
+            } finally {
+                t.close();
+            }
+        } catch (Throwable e) {
+            Log.e("chunks.tmp", e);
+        }
+    }
+
+    private static void readChunks(Level l, InputStream in, boolean hasLight, boolean[] keep) throws IOException {
         byte[] header = new byte[4096];
         readFully(in, header, 0, 4096);
         // чанки по возрастанию сектора, чтобы читать поток последовательно
@@ -441,6 +573,7 @@ public final class Storage {
                 if (off == 0) continue;
                 sect[n] = off >>> 8;
                 idx[n] = cx | (cz << 4);
+                l.chunkOff[cx | (cz << 4)] = (off >>> 8) * 4096;
                 n++;
             }
         for (int i = 1; i < n; i++) {
@@ -450,7 +583,7 @@ public final class Storage {
         }
         long pos = 4096;
         byte[] lenb = new byte[4];
-        byte[] b = new byte[32768], d = new byte[16384];
+        byte[] b = new byte[32768], d = new byte[16384], um = new byte[256];
         for (int i = 0; i < n; i++) {
             long target = (long) sect[i] * 4096L;
             if (target < pos) continue;
@@ -472,8 +605,18 @@ public final class Storage {
                 got += readPart(in, b, 16384, len - got);
                 l.blk.importChunk(c, b, true);
             }
-            got += readPart(in, l.updateMap[c], 256, len - got);
+            got += readPart(in, um, 256, len - got);
+            for (int k = 0; k < 256; k++)
+                if (um[k] != 0) {
+                    byte[] u = l.umw(c);
+                    System.arraycopy(um, 0, u, 0, 256);
+                    break;
+                }
             pos += got;
+            if (keep != null) {
+                l.calcChunkHeights(c);
+                if (!keep[c] && !l.unsaved[c]) l.evictChunk(c);
+            }
         }
     }
 

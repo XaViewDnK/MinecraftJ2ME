@@ -572,6 +572,7 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
         if (signs != null && ticks % 200 == 0) signs.forget(level);
         // пиксели текстур интерфейса, не нужные 20 с (всё нужное уже в кэшах кусков), — выгрузить
         if (ticks % 400 == 0) R.dropTextures(20000);
+        if (ticks % 200 == 100) level.evictFar();
     }
 
     // ---- мир ----
@@ -633,6 +634,16 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
     }
 
     long loadMs;
+
+    static String[] split(String s, char c) {
+        java.util.Vector v = new java.util.Vector();
+        int p = 0;
+        for (int q; (q = s.indexOf(c, p)) >= 0; p = q + 1) v.addElement(s.substring(p, q));
+        v.addElement(s.substring(p));
+        String[] r = new String[v.size()];
+        v.copyInto(r);
+        return r;
+    }
     private int memTicks;
 
     /** занятый хип и размер слоёв мира (КБ) — для замеров памяти */
@@ -641,7 +652,7 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
         r.gc();
         return "heap " + ((r.totalMemory() - r.freeMemory()) >> 10) + "K/" + (r.totalMemory() >> 10) + "K, world blocks "
                 + (l.blocks.bytes() >> 10) + "K data " + (l.data.bytes() >> 10) + "K sky " + (l.sky.bytes() >> 10) + "K blk "
-                + (l.blk.bytes() >> 10) + "K";
+                + (l.blk.bytes() >> 10) + "K, chunks out " + l.goneCount + " loaded back " + l.faults;
     }
 
     // ---- клиент сетевой игры (ClientSideNetworkHandler -> Minecraft) ----
@@ -665,7 +676,7 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
             }
         });
         // ChunkCache::postProcess -> clearUpdateMap: своё поколение — без отметок изменений
-        for (int i = 0; i < l.updateMap.length; i++) for (int k = 0; k < 256; k++) l.updateMap[i][k] = 0;
+        for (int i = 0; i < l.updateMap.length; i++) l.updateMap[i] = null;
         Player p = new Player(l, gameType == 1);
         l.player = p;
         l.spawnX = Mth.floor(c.sx);
@@ -774,6 +785,8 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
         player = p;
         l.player = p;
         l.updateSkyDarken();
+        // дальние сохранённые чанки — из памяти до постройки мешей (пик подготовки)
+        l.evictFar();
         lr = new LevelRenderer(l, R.terrain2D);
         if (MemDbg.on) MemDbg.mark("lr");
         takes.removeAllElements();
@@ -798,6 +811,8 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
         Log.i("LOAD read " + loadMs + " ms, prepare " + (System.currentTimeMillis() - t0) + " ms, left " + lr.pendingCount() + "/" + total
                 + ", " + memInfo(l));
         loadMs = 0;
+        // фон-«земля» экранов загрузки в игре не нужен до паузы
+        R.dropDirt();
         if (MemDbg.on) MemDbg.mark("prepared");
         memTicks = 0;
         setScreen(null);
@@ -821,7 +836,9 @@ public final class MC extends GameCanvas implements Runnable, CommandListener {
             return;
         }
         if (cr != null && cr.indexOf(':') > 0) {
-            createWorld(cr.substring(0, cr.indexOf(':')), Long.parseLong(cr.substring(cr.indexOf(':') + 1)), 0);
+            // mcj.create=<папка>:<сид>[:1] — :1 творческий режим
+            String[] f = split(cr, ':');
+            createWorld(f[0], Long.parseLong(f[1]), f.length > 2 ? Integer.parseInt(f[2]) : 0);
             return;
         }
         if (sc == null && w == null) return;

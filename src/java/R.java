@@ -94,6 +94,7 @@ public final class R {
             }
         }
         if (idleMs == 0) {
+            // dirtCache остаётся: фон экрана загрузки рисуется во время генерации (иначе снова грузить terrain.png)
             blitCache.clear();
             stretchCache.clear();
             iconCache.clear();
@@ -379,6 +380,10 @@ public final class R {
     }
 
     private static final Hashtable dirtCache = new Hashtable();
+
+    public static void dropDirt() {
+        dirtCache.clear();
+    }
 
     /** Screen::renderDirtBackground: gui/background.png, плитка 32 пикселя GUI, затемнение shade (0x40 — меню). */
     public static void dirt(Graphics g, float x0, float y0, float x1, float y1, int shade, float uOff) {

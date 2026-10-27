@@ -4,14 +4,16 @@ import java.util.Random;
  * Мир 256x128x256 из 16x16 чанков. Хранение внутри чанка — как в файле MCPE:
  * индекс (x<<11)|(z<<7)|y, полубайтовые массивы data/skyLight/blockLight (чётный индекс — младшая тетрада).
  */
-public final class Level {
+public final class Level implements Pal.Src {
     public static final int SIZE = 256, HEIGHT = 128, CHUNKS = 16;
     public static final int SEA_LEVEL = 64;
     public static final int TICKS_PER_DAY = 19200;
 
     /** блоки, data, свет неба и блоков — сжатые слои (Pal), сырыми было бы 20 МБ */
     public final Pal blocks = new Pal(8), data = new Pal(4), sky = new Pal(4), blk = new Pal(4);
+    /** отметки изменённых секций столбцов (формат файла и сети 0.6.1); массив чанка заводится при первой отметке */
     public final byte[][] updateMap = new byte[CHUNKS * CHUNKS][];
+    private static final byte[] UM_ZERO = new byte[256];
     public final boolean[] unsaved = new boolean[CHUNKS * CHUNKS];
     /** y первого блока над непрозрачной для света частью столбца */
     public final byte[] height = new byte[SIZE * SIZE];
@@ -47,9 +49,8 @@ public final class Level {
     private int randValue;
 
     public Level() {
-        for (int i = 0; i < CHUNKS * CHUNKS; i++) {
-            updateMap[i] = new byte[256];
-        }
+        blocks.src = data.src = sky.src = blk.src = this;
+        blocks.dirty = data.dirty = sky.dirty = blk.dirty = unsaved;
         randValue = random.nextInt();
     }
 
@@ -200,7 +201,7 @@ public final class Level {
         if (old != 0) TileLogic.onRemove(this, old, x, y, z);
         data.set(c, i, d);
         unsaved[c] = true;
-        updateMap[c][(x & 15) | ((z & 15) << 4)] |= (byte) (1 << (y >> 4));
+        umw(c)[(x & 15) | ((z & 15) << 4)] |= (byte) (1 << (y >> 4));
         if (Tile.lightBlock[old] != Tile.lightBlock[id] || Tile.lightEmit[old] != Tile.lightEmit[id]) {
             relightAt(x, y, z);
         }
@@ -222,10 +223,23 @@ public final class Level {
         if (data.get(c, i) == d) return false;
         data.set(c, i, d);
         unsaved[c] = true;
-        updateMap[c][(x & 15) | ((z & 15) << 4)] |= (byte) (1 << (y >> 4));
+        umw(c)[(x & 15) | ((z & 15) << 4)] |= (byte) (1 << (y >> 4));
         if (renderer != null) renderer.tileChanged(x, y, z);
         if (net != null) net.tileChanged(x, y, z);
         return true;
+    }
+
+    /** updateMap чанка для чтения (без отметок — общий нулевой, писать в него нельзя) */
+    public byte[] um(int c) {
+        byte[] u = updateMap[c];
+        return u != null ? u : UM_ZERO;
+    }
+
+    /** updateMap чанка для записи */
+    public byte[] umw(int c) {
+        byte[] u = updateMap[c];
+        if (u == null) updateMap[c] = u = new byte[256];
+        return u;
     }
 
     /** Level::updateNeighborsAt: шесть соседей, type — id изменившегося блока. */
@@ -514,6 +528,7 @@ public final class Level {
      * чанка или целиком под ним заполняются одним значением, растекание идёт только от границ.
      */
     public void recalcAllLight() {
+        loadAll();
         recalcHeightmap();
         int[] vals = new int[Pal.CELLS];
         for (int c = 0; c < CHUNKS * CHUNKS; c++) {
@@ -951,6 +966,115 @@ public final class Level {
     }
 
     /** Level::tick: время, отложенные тики, случайные тики чанков вокруг игрока. */
+    // ---- выгрузка дальних чанков ----
+    // Неизменённый после сохранения чанк вдали от игроков и тикающих существ не держится в памяти: его куски в Pal
+    // заменяются меткой, первое обращение читает чанк из chunks.dat (формат файла MCPE 0.6.1 тот же).
+
+    /** chunks.dat, из которого подгружаются выгруженные чанки; null — выгрузки нет (мир не сохранён, сетевой клиент) */
+    public String chunkFile;
+    /** смещения чанков в chunkFile (байт; 0 — чанка в файле нет) */
+    public final int[] chunkOff = new int[CHUNKS * CHUNKS];
+    /** чанк выгружен */
+    public final boolean[] gone = new boolean[CHUNKS * CHUNKS];
+    private final long[] loadedAt = new long[CHUNKS * CHUNKS];
+    private final boolean[] keep = new boolean[CHUNKS * CHUNKS];
+    public int goneCount, faults;
+    /** радиус (в чанках) вокруг игроков, который всегда в памяти: дальность прорисовки 4 + сосед для граней */
+    static final int KEEP = 5;
+
+    /** Pal.Src: обращение к выгруженному чанку */
+    public synchronized void fault(int ch) {
+        if (!gone[ch]) return;
+        for (int attempt = 0; ; attempt++) {
+            try {
+                Storage.readChunk(this, ch);
+                break;
+            } catch (Throwable t) {
+                Log.e("chunk " + ch + " read", t);
+                if (attempt == 2) {
+                    // файл не читается (испорчен снаружи): чанк — воздух, выгрузка дальше выключена
+                    chunkFile = null;
+                    blocks.blank(ch);
+                    data.blank(ch);
+                    sky.blank(ch);
+                    blk.blank(ch);
+                    break;
+                }
+            }
+        }
+        gone[ch] = false;
+        goneCount--;
+        faults++;
+        loadedAt[ch] = System.currentTimeMillis();
+    }
+
+    /** выгрузить чанк (вызывающий проверил: сохранён, есть в файле) */
+    synchronized void evictChunk(int ch) {
+        if (gone[ch]) return;
+        blocks.evict(ch);
+        data.evict(ch);
+        sky.evict(ch);
+        blk.evict(ch);
+        gone[ch] = true;
+        goneCount++;
+    }
+
+    /** подгрузить все выгруженные (полный пересчёт света и т.п.) */
+    public void loadAll() {
+        for (int c = 0; c < CHUNKS * CHUNKS; c++) if (gone[c]) fault(c);
+    }
+
+    private void keepAround(float x, float z, int r) {
+        int cx = Mth.floor(x) >> 4, cz = Mth.floor(z) >> 4;
+        for (int i = cx - r; i <= cx + r; i++)
+            for (int k = cz - r; k <= cz + r; k++)
+                if (i >= 0 && i < CHUNKS && k >= 0 && k < CHUNKS) keep[i | (k << 4)] = true;
+    }
+
+    /** Отметить чанки, которые нельзя выгружать (для загрузки мира — только окрестность точки x, z). */
+    boolean[] keepSet(float x, float z) {
+        for (int c = 0; c < keep.length; c++) keep[c] = false;
+        keepAround(x, z, KEEP);
+        return keep;
+    }
+
+    /**
+     * Выгрузка возможна только в творческом режиме: в выживании MobSpawner 0.6.1 каждые 2 тика пробует точку в каждом
+     * чанке радиусом 8 (дружелюбных — во всём мире), весь мир нужен постоянно — выгрузка дала бы непрерывное чтение диска.
+     */
+    public boolean canEvict() {
+        return chunkFile != null && !isClientSide && gameType == 1;
+    }
+
+    /** Выгрузить дальние сохранённые чанки: вне радиуса KEEP от игроков, без тикающих существ и отложенных тиков. */
+    public synchronized void evictFar() {
+        if (!canEvict() || player == null) return;
+        for (int c = 0; c < keep.length; c++) keep[c] = false;
+        keepAround(player.x, player.z, KEEP);
+        for (int i = 0; i < entities.size(); i++) {
+            Entity e = (Entity) entities.elementAt(i);
+            if (e.removed) continue;
+            if (e instanceof RemotePlayer) keepAround(e.x, e.z, KEEP);
+            // сущности в 96 блоках от игроков тикают (tickEntities) — их чанк и соседи нужны
+            else if (nearestPlayerDist2(e.x, e.y, e.z) < 100 * 100) keepAround(e.x, e.z, 1);
+        }
+        for (java.util.Enumeration en = tileEntities.elements(); en.hasMoreElements(); ) {
+            TileEntity te = (TileEntity) en.nextElement();
+            keepAround(te.x, te.z, 1);
+        }
+        for (int i = 0; i < tkCount; i++) keepAround(tkPos[i] & 255, (tkPos[i] >> 8) & 255, 1);
+        long now = System.currentTimeMillis();
+        for (int c = 0; c < keep.length; c++)
+            if (!keep[c] && !gone[c] && !unsaved[c] && chunkOff[c] != 0 && now - loadedAt[c] > 30000) evictChunk(c);
+    }
+
+    /** высоты столбцов одного чанка (загрузка мира по чанкам) */
+    void calcChunkHeights(int ch) {
+        int x0 = (ch & 15) << 4, z0 = (ch >> 4) << 4;
+        for (int x = x0; x < x0 + 16; x++)
+            for (int z = z0; z < z0 + 16; z++) height[x | (z << 8)] = (byte) calcHeight(x, z);
+    }
+
     public void tick() {
         time++;
         if (isClientSide) {

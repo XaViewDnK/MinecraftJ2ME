@@ -19,8 +19,35 @@ public final class Pal {
     private int st;
     private int[] exp;
 
+    /** кусок выгруженного чанка (данные лежат только в chunks.dat): [0] = EVB, бит на клетку таким не бывает */
+    static final int EVB = 99;
+    static final byte[] EV = { (byte) EVB };
+
+    /** подгрузка выгруженного чанка (Level) */
+    interface Src {
+        void fault(int ch);
+    }
+
+    Src src;
+    /** отметки «чанк изменён после сохранения» (Level.unsaved) — ставятся при любой записи, в том числе света */
+    boolean[] dirty;
+
     public Pal(int maxBits) {
         this.maxBits = maxBits;
+    }
+
+    private void load(int ch) {
+        src.fault(ch);
+    }
+
+    /** чанк — воздух без подгрузки (файл не читается) */
+    void blank(int ch) {
+        for (int py = 0; py < NP; py++) fill0((ch << 5) | py, 0);
+    }
+
+    /** выгрузить чанк: куски заменяются меткой EV, чтение подгрузит их из файла */
+    void evict(int ch) {
+        for (int py = 0; py < NP; py++) arr[(ch << 5) | py] = EV;
     }
 
     /** кусок: чанк и четвёрка по высоте */
@@ -42,8 +69,13 @@ public final class Pal {
         int k = (ch << 5) | ((i & 127) >> 2);
         byte[] a = arr[k];
         if (a == null) return uni[k] & 255;
+        int b = a[0];
+        if (b == EVB) {
+            load(ch);
+            return get(ch, i);
+        }
         int c = ((i >> 5) & 0x3FC) | (i & 3);
-        int b = a[0], bp = c * b, o = a.length - 1 - (b << 7) + (bp >> 3);
+        int bp = c * b, o = a.length - 1 - (b << 7) + (bp >> 3);
         int v = (((a[o] & 255) | (a[o + 1] << 8)) >> (bp & 7)) & ((1 << b) - 1);
         return b == maxBits ? v : a[2 + v] & 255;
     }
@@ -52,6 +84,11 @@ public final class Pal {
         int k = (ch << 5) | ((i & 127) >> 2);
         int c = ((i >> 5) & 0x3FC) | (i & 3);
         byte[] a = arr[k];
+        if (a == EV) {
+            load(ch);
+            a = arr[k];
+        }
+        if (dirty != null) dirty[ch] = true;
         if (a == null) {
             int u = uni[k] & 255;
             if (u == v) return;
@@ -84,7 +121,7 @@ public final class Pal {
                     // палитра полна: пересобрать кусок (заодно выкинуть неиспользуемые значения)
                     decode(k, tmp);
                     tmp[c] = v;
-                    encode(k, tmp);
+                    encode0(k, tmp);
                     return;
                 }
             }
@@ -97,6 +134,7 @@ public final class Pal {
 
     /** весь слой — одно значение */
     public void clear(int v) {
+        if (dirty != null) for (int ch = 0; ch < dirty.length; ch++) dirty[ch] = true;
         for (int k = 0; k < arr.length; k++) {
             uni[k] = (byte) v;
             arr[k] = null;
@@ -104,15 +142,28 @@ public final class Pal {
     }
 
     public boolean uniform(int k) {
-        return arr[k] == null;
+        byte[] a = arr[k];
+        if (a == EV) {
+            load(k >> 5);
+            a = arr[k];
+        }
+        return a == null;
     }
 
     public int uniformValue(int k) {
+        if (arr[k] == EV) load(k >> 5);
         return uni[k] & 255;
     }
 
     /** весь кусок k — значение v */
     public void fill(int k, int v) {
+        if (arr[k] == EV) load(k >> 5);
+        if (dirty != null) dirty[k >> 5] = true;
+        uni[k] = (byte) v;
+        arr[k] = null;
+    }
+
+    private void fill0(int k, int v) {
         uni[k] = (byte) v;
         arr[k] = null;
     }
@@ -120,6 +171,10 @@ public final class Pal {
     /** значения клеток куска (порядок cell) */
     public void decode(int k, int[] out) {
         byte[] a = arr[k];
+        if (a == EV) {
+            load(k >> 5);
+            a = arr[k];
+        }
         if (a == null) {
             int u = uni[k] & 255;
             for (int c = 0; c < CELLS; c++) out[c] = u;
@@ -136,6 +191,13 @@ public final class Pal {
 
     /** записать кусок самым коротким видом */
     public void encode(int k, int[] vals) {
+        if (arr[k] == EV) load(k >> 5);
+        if (dirty != null) dirty[k >> 5] = true;
+        encode0(k, vals);
+    }
+
+    /** то же без подгрузки и отметки изменения (загрузка из файла) */
+    private void encode0(int k, int[] vals) {
         int s = ++st, n = 0;
         if (s == 0) {
             for (int j = 0; j < 256; j++) stamp[j] = 0;
@@ -150,7 +212,7 @@ public final class Pal {
             }
         }
         if (n == 1) {
-            fill(k, vals[0]);
+            fill0(k, vals[0]);
             return;
         }
         int b = 1;
@@ -180,7 +242,7 @@ public final class Pal {
                 int i = index(py, c);
                 t[c] = nibbles ? (raw[i >> 1] >> ((i & 1) << 2)) & 15 : raw[i] & 255;
             }
-            encode((ch << 5) | py, t);
+            encode0((ch << 5) | py, t);
         }
     }
 
@@ -203,7 +265,7 @@ public final class Pal {
     /** байт на куски (для отладки и замеров) */
     public int bytes() {
         int n = 0;
-        for (int k = 0; k < arr.length; k++) if (arr[k] != null) n += arr[k].length + 12;
+        for (int k = 0; k < arr.length; k++) if (arr[k] != null && arr[k] != EV) n += arr[k].length + 12;
         return n;
     }
 }

@@ -335,7 +335,7 @@ public final class NetClient {
                 }
                 for (int k = 0; k < 8; k++) data[(p >> 1) + k] = (byte) in.u8();
             }
-            level.updateMap[ci][i] |= (byte) bits;
+            if (bits != 0) level.umw(ci)[i] |= (byte) bits;
         }
         if (any) {
             level.blocks.importChunk(ci, blocks, false);
